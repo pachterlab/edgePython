@@ -108,6 +108,11 @@ The [examples/mammary](examples/mammary) directory contains two notebooks for th
 - [mouse_mammary_tutorial.ipynb](examples/mammary/mouse_mammary_tutorial.ipynb) — edgePython-only tutorial (Colab-ready)
 - [mouse_mammary_R_vs_Python.ipynb](examples/mammary/mouse_mammary_R_vs_Python.ipynb) — side-by-side edgeR vs edgePython comparison
 
+The [examples/hoxa1](examples/hoxa1) directory contains two notebooks for the GSE37704 HOXA1 knockdown dataset ([Trapnell et al. 2013](https://doi.org/10.1038/nbt.2594)), with transcript-level quantification by kallisto:
+
+- [hoxa1_tutorial.ipynb](examples/hoxa1/hoxa1_tutorial.ipynb) — edgePython-only tutorial with scaled analysis using bootstrap overdispersion (Colab-ready)
+- [hoxa1_R_vs_Python.ipynb](examples/hoxa1/hoxa1_R_vs_Python.ipynb) — side-by-side edgeR vs edgePython comparison reproducing Figure 1 panels
+
 ## Development
 
 Run tests:
