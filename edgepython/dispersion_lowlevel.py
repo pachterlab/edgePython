@@ -385,7 +385,10 @@ def maximize_interpolant(x, y):
 
     ngenes = y.shape[0]
     npts = len(x)
-    n_fine = 200
+    # Use a fine grid dense enough to produce smooth trended dispersions.
+    # The grid spans npts-1 intervals; using ~500 points per interval
+    # ensures the argmax is resolved well below visible discretisation.
+    n_fine = max(10000, 500 * (npts - 1))
 
     result = np.empty(ngenes, dtype=np.float64)
     _maximize_interpolant_kernel(x, y, ngenes, npts, n_fine, result)
