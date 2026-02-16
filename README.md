@@ -1,7 +1,7 @@
 # edgePython
 
-`edgePython` is a Python implementation of the Bioconductor `edgeR` package for differential analysis of genomics count data.
- 
+`edgePython` is a Python implementation of the Bioconductor `edgeR` package for differential analysis of genomics count data. It also includes a new single-cell differential expression method that extends the NEBULA-LN negative binomial mixed model with edgeR's TMM normalization and empirical Bayes dispersion shrinkage.
+
 The package includes:
 - `DGEList`-style data structures
 - normalization and filtering
@@ -90,6 +90,22 @@ pytest -q
 ## Authorship
 
 This code was written by Claude (Anthropic). The project was directed by Lior Pachter.
+
+## edgeR
+
+`edgePython` is based on the [edgeR](https://bioconductor.org/packages/edgeR/) Bioconductor package. The edgeR publications are:
+
+- Robinson MD, McCarthy DJ, Smyth GK (2010). edgeR: a Bioconductor package for differential expression analysis of digital gene expression data. *Bioinformatics*, 26(1), 139-140. [doi:10.1093/bioinformatics/btp616](https://doi.org/10.1093/bioinformatics/btp616)
+
+- McCarthy DJ, Chen Y, Smyth GK (2012). Differential expression analysis of multifactor RNA-Seq experiments with respect to biological variation. *Nucleic Acids Research*, 40(10), 4288-4297. [doi:10.1093/nar/gks042](https://doi.org/10.1093/nar/gks042)
+
+- Chen Y, Lun ATL, Smyth GK (2016). From reads to genes to pathways: differential expression analysis of RNA-Seq experiments using Rsubread and the edgeR quasi-likelihood pipeline. *F1000Research*, 5, 1438. [doi:10.12688/f1000research.8987.2](https://doi.org/10.12688/f1000research.8987.2)
+
+- Chen Y, Chen L, Lun ATL, Baldoni PL, Smyth GK (2025). edgeR v4: powerful differential analysis of sequencing data with expanded functionality and improved support for small counts and larger datasets. *Nucleic Acids Research*, 53(2), gkaf018. [doi:10.1093/nar/gkaf018](https://doi.org/10.1093/nar/gkaf018)
+
+The single-cell mixed model in `edgePython` is based on NEBULA:
+
+- He L, Davila-Velderrain J, Sumida TS, Hafler DA, Kellis M, Kulminski AM (2021). NEBULA is a fast negative binomial mixed model for differential or co-expression analysis of large-scale multi-subject single-cell data. *Communications Biology*, 4, 629. [doi:10.1038/s42003-021-02146-6](https://doi.org/10.1038/s42003-021-02146-6)
 
 ## License
 
