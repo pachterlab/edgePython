@@ -2,18 +2,6 @@
 
 `edgePython` is a Python implementation of the Bioconductor `edgeR` package for differential analysis of genomics count data. It also includes a new single-cell differential expression method that extends the NEBULA-LN negative binomial mixed model with edgeR's TMM normalization and empirical Bayes dispersion shrinkage.
 
-The package includes:
-- `DGEList`-style data structures
-- normalization and filtering
-- dispersion estimation
-- exact test and GLM-based testing (`LRT`, `QLF`, `TREAT`)
-- gene set testing (`camera`, `fry`, `roast`, `mroast`, `romer`, `goana`, `kegga`)
-- differential splicing utilities
-- I/O helpers for common RNA-seq quantification outputs
-- single-cell negative binomial mixed models (`glm_sc_fit`, `glm_sc_test`, `shrink_sc_disp`)
-- ChIP-seq normalization utilities (`normalize_chip_to_input`, `calc_norm_offsets_for_chip`)
-- methylation/RRBS helpers (`read_bismark2dge`, `model_matrix_meth`)
-
 ## Installation
 
 From source:
@@ -49,35 +37,76 @@ top = ep.top_tags(res, n=10)
 print(top["table"].head())
 ```
 
-## Single-Cell Mixed Model
+## Features
 
-`edgePython` includes a NEBULA-LN-style single-cell workflow:
+### Data Structures
 
-```python
-# y_sc: genes x cells counts
-# cell_meta: per-cell metadata DataFrame
-# sample: column in cell_meta identifying subject/sample
-fit_sc = ep.glm_sc_fit(y_sc, cell_meta=cell_meta, design="~ group", sample="subject_id")
-fit_sc = ep.shrink_sc_disp(fit_sc)
-res_sc = ep.glm_sc_test(fit_sc, coef=1)
-top_sc = ep.top_tags(res_sc, n=20)
-```
+`DGEList`-style data structures (`make_dgelist`, `cbind_dgelist`, `rbind_dgelist`, `valid_dgelist`) with accessor functions (`get_counts`, `get_dispersion`, `get_norm_lib_sizes`, `get_offset`).
 
-## ChIP-Seq and Methylation
+### Normalization
 
-ChIP-seq normalization to matched input controls:
+TMM, TMMwsp, RLE, and upper-quartile normalization via `calc_norm_factors`. Normalized expression values via `cpm`, `rpkm`, `tpm`, `ave_log_cpm`, `cpm_by_group`, and `rpkm_by_group`.
 
-```python
-# input_counts and response are arrays (features x samples)
-offsets = ep.calc_norm_offsets_for_chip(input_counts, response)
-```
+### Filtering
 
-RRBS/methylation workflow helpers:
+Gene filtering by expression level via `filter_by_expr`.
 
-```python
-dge_bs = ep.read_bismark2dge(files)
-design_bs = ep.model_matrix_meth(dge_bs, design=design)
-```
+### Dispersion Estimation
+
+Common, trended, and tagwise dispersion estimation (`estimate_disp`, `estimate_common_disp`, `estimate_trended_disp`, `estimate_tagwise_disp`) with GLM variants (`estimate_glm_common_disp`, `estimate_glm_trended_disp`, `estimate_glm_tagwise_disp`). Weighted likelihood empirical Bayes shrinkage via `WLEB`.
+
+### Differential Expression Testing
+
+- **Exact test**: `exact_test` for two-group comparisons with exact negative binomial tests, plus helpers (`exact_test_double_tail`, `equalize_lib_sizes`, `q2q_nbinom`, `split_into_groups`).
+- **GLM fitting**: `glm_fit`, `glm_ql_fit` for generalized linear model fitting.
+- **GLM testing**: likelihood ratio tests (`glm_lrt`), quasi-likelihood F-tests (`glm_ql_ftest`), and fold-change threshold testing (`glm_treat`).
+- **Results**: `top_tags` for extracting top DE genes with p-value adjustment, `decide_tests` for classifying genes as up/down/unchanged.
+
+### Gene Set Testing
+
+Competitive and self-contained gene set tests: `camera`, `fry`, `roast`, `mroast`, `romer`. Gene ontology and KEGG pathway enrichment via `goana` and `kegga`.
+
+### Differential Splicing
+
+Differential exon and transcript usage testing via `diff_splice` (GLM-based with LRT or QL tests), `diff_splice_dge` (exact test for two-group comparisons), and `splice_variants` (chi-squared tests for homogeneity of proportions across exons).
+
+### Quantification Uncertainty
+
+Reading quantification output with bootstrap or Gibbs sampling uncertainty from Salmon (`catch_salmon`), kallisto (`catch_kallisto`), and RSEM (`catch_rsem`). Overdispersion estimates from quantification uncertainty are used for differential transcript expression following the approach of Baldoni et al. (2024).
+
+### I/O
+
+- **Universal reader**: `read_data` with auto-detection for kallisto (H5/TSV), Salmon, oarfish, RSEM, 10X CellRanger, CSV/TSV count tables, AnnData (`.h5ad`), and RDS files.
+- **Specialized readers**: `read_dge` (collates per-sample count files), `read_10x` (10X Genomics output), `feature_counts_to_dgelist` (featureCounts output), `read_bismark2dge` (Bismark methylation coverage).
+- **Single-cell aggregation**: `seurat_to_pb` for pseudo-bulk aggregation.
+- **Export**: `to_anndata` for converting DGEList and results to AnnData format.
+
+### Visualization
+
+`plot_md` (mean-difference plots), `plot_bcv` (biological coefficient of variation), `plot_mds` (multidimensional scaling), `plot_ql_disp` (quasi-likelihood dispersion), `plot_smear` (smear plots), `ma_plot` (MA plots), and `gof` (goodness of fit).
+
+### Single-Cell Mixed Model
+
+NEBULA-LN-style negative binomial gamma mixed model for multi-subject single-cell data: `glm_sc_fit`, `shrink_sc_disp`, `glm_sc_test`.
+
+### ChIP-Seq
+
+ChIP-seq normalization to matched input controls via `normalize_chip_to_input` and `calc_norm_offsets_for_chip`.
+
+### Methylation/RRBS
+
+Bismark coverage file reader (`read_bismark2dge`) and methylation-specific design matrix construction (`model_matrix_meth`).
+
+### Utilities
+
+Design matrix construction (`model_matrix`), prior count addition (`add_prior_count`), predicted fold changes (`pred_fc`), Good-Turing smoothing (`good_turing`), count thinning/downsampling (`thin_counts`), Gini coefficient (`gini`), sum technical replicates (`sum_tech_reps`), negative binomial z-scores (`zscore_nbinom`), nearest TSS annotation (`nearest_tss`), and variance shrinkage (`squeeze_var`).
+
+## Examples
+
+The [examples/mammary](examples/mammary) directory contains two notebooks for the GSE60450 mouse mammary dataset ([Fu et al. 2015](https://www.nature.com/articles/ncb3117)):
+
+- [mouse_mammary_tutorial.ipynb](examples/mammary/mouse_mammary_tutorial.ipynb) — edgePython-only tutorial (Colab-ready)
+- [mouse_mammary_R_vs_Python.ipynb](examples/mammary/mouse_mammary_R_vs_Python.ipynb) — side-by-side edgeR vs edgePython comparison
 
 ## Development
 
