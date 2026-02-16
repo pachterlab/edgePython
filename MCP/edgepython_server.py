@@ -53,6 +53,10 @@ _state: dict = {
     "filtered": False,
     "normalized": False,
     "dispersions_estimated": False,
+    "feature_level": "unknown",  # inferred: gene | transcript | unknown
+    "feature_level_note": None,
+    "analysis_context": "unknown",  # inferred: bulk | single_cell_10x | single_cell | unknown
+    "analysis_context_note": None,
 }
 
 
@@ -72,6 +76,130 @@ def _gene_name(row):
             return str(row[col])
     # Fall back to row index
     return str(row.name)
+
+
+def _infer_feature_level(feature_ids: Optional[list]) -> tuple[str, str]:
+    """Heuristically infer feature level from row IDs."""
+    if not feature_ids:
+        return "unknown", "unknown (no feature IDs found)"
+
+    ids = [str(x).strip() for x in feature_ids if str(x).strip()]
+    if not ids:
+        return "unknown", "unknown (no non-empty feature IDs found)"
+
+    # Sample up to 500 IDs for a lightweight heuristic.
+    ids = ids[:500]
+    n = len(ids)
+
+    tx_patterns = (
+        r"(^|[|_.-])ENST\d+",
+        r"(^|[|_.-])NM_\d+",
+        r"(^|[|_.-])NR_\d+",
+        r"(^|[|_.-])XM_\d+",
+        r"(^|[|_.-])XR_\d+",
+        r"\btx\d+\b",
+        r"\btranscript\b",
+        r"\bisoform\b",
+    )
+    gene_patterns = (
+        r"(^|[|_.-])ENSG\d+",
+        r"(^|[|_.-])FBgn\d+",
+        r"(^|[|_.-])WBGene\d+",
+    )
+
+    tx_hits = 0
+    gene_hits = 0
+    for s in ids:
+        if any(re.search(p, s, flags=re.IGNORECASE) for p in tx_patterns):
+            tx_hits += 1
+        if any(re.search(p, s, flags=re.IGNORECASE) for p in gene_patterns):
+            gene_hits += 1
+
+    tx_frac = tx_hits / n
+    gene_frac = gene_hits / n
+
+    # Bias to gene-level when uncertain (edgePython default use case).
+    if tx_frac >= 0.10 and tx_hits >= 5:
+        return "transcript", f"transcript/isoform-like IDs ({tx_hits}/{n})"
+    if gene_frac >= 0.10 and gene_hits >= 5:
+        return "gene", f"gene-like IDs ({gene_hits}/{n})"
+    return "gene", "gene-level assumed (IDs do not strongly indicate transcript-level)"
+
+
+def _infer_analysis_context(
+    source: Optional[str] = None,
+    data_input: Optional[object] = None,
+    sample_names: Optional[list] = None,
+    default_bulk: bool = False,
+) -> tuple[str, str]:
+    """Heuristically infer sequencing/analysis context."""
+    src = (source or "").strip().lower()
+
+    # Flatten potential path-like clues.
+    clues = []
+    if isinstance(data_input, (list, tuple)):
+        clues.extend([str(x).lower() for x in data_input])
+    elif data_input is not None:
+        clues.append(str(data_input).lower())
+
+    clue_text = " ".join(clues)
+
+    # Strong single-cell/10x signals.
+    if src == "10x" or "10x" in clue_text or "cellranger" in clue_text:
+        return "single_cell_10x", "10x/cellranger-like source/path"
+
+    if src == "anndata" or any(s.endswith('.h5ad') for s in clues):
+        # Could be 10x-derived or non-10x single-cell.
+        if "10x" in clue_text or "cellranger" in clue_text:
+            return "single_cell_10x", "AnnData with 10x/cellranger-like clues"
+        return "single_cell", "AnnData source/path"
+
+    # SMART-seq / random-primed style clues -> bulk-like transcriptome input.
+    if any(k in clue_text for k in ("smartseq", "smart-seq", "smart_seq", "random primed", "random_primed", "random-primed")):
+        return "bulk", "SMART-seq/random-primed-like clues"
+
+    # Source families typically used for bulk transcript quantification.
+    if src in {"kallisto", "salmon", "rsem", "oarfish", "table", "matrix", "dataframe", "sparse", "rds"}:
+        return "bulk", f"source='{src}' typically bulk/pseudobulk-like"
+
+    # Sample-name heuristic for 10x-like barcodes.
+    if sample_names:
+        names = [str(x) for x in sample_names]
+        if names:
+            barcode_hits = 0
+            for n in names:
+                s = n.strip()
+                if re.fullmatch(r"[ACGT]{8,}(?:-\d+)?", s):
+                    barcode_hits += 1
+            frac = barcode_hits / len(names)
+            if len(names) >= 100 and frac >= 0.5:
+                return "single_cell_10x", f"sample names look like 10x barcodes ({barcode_hits}/{len(names)})"
+
+    if default_bulk:
+        return "bulk", "bulk assumed from count-matrix workflow"
+
+    return "unknown", "insufficient clues"
+
+
+def _is_bulk_like_context() -> bool:
+    return _state.get("analysis_context") == "bulk"
+
+
+def _gene_level_warning() -> Optional[str]:
+    """Soft warning shown only for likely bulk/random-primed contexts."""
+    if _state.get("feature_level") == "gene" and _is_bulk_like_context():
+        return (
+            "Note: This appears to be gene-level DE in a bulk/random-primed-like context. "
+            "If transcript/isoform quantifications are available, consider isoform-level "
+            "analysis to avoid masking isoform-specific changes."
+        )
+    return None
+
+
+def _append_gene_level_warning(lines: list) -> None:
+    warn = _gene_level_warning()
+    if warn:
+        lines.extend(["", warn])
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +273,19 @@ def load_data(
     dgelist["_sample_names"] = sample_names
     dgelist["_gene_ids"] = gene_ids
 
+    level, level_note = _infer_feature_level(gene_ids)
+    context, context_note = _infer_analysis_context(
+        source=None,
+        data_input=counts_path,
+        sample_names=sample_names,
+        default_bulk=True,
+    )
+
     _state["dgelist"] = dgelist
+    _state["feature_level"] = level
+    _state["feature_level_note"] = level_note
+    _state["analysis_context"] = context
+    _state["analysis_context_note"] = context_note
     _state["filtered"] = False
     _state["normalized"] = False
     _state["dispersions_estimated"] = False
@@ -172,6 +312,11 @@ def load_data(
         f"Library sizes: {int(lib_sizes.min()):,} – {int(lib_sizes.max()):,} "
         f"(median {int(np.median(lib_sizes)):,})"
     )
+    if _state.get("feature_level_note"):
+        lines.append(f"Feature level: {_state['feature_level']} ({_state['feature_level_note']})")
+    if _state.get("analysis_context_note"):
+        lines.append(f"Context: {_state['analysis_context']} ({_state['analysis_context_note']})")
+    _append_gene_level_warning(lines)
     return "\n".join(lines)
 
 
@@ -258,6 +403,18 @@ def load_data_auto(
     if gene_ids is not None:
         dgelist["_gene_ids"] = gene_ids
 
+    level, level_note = _infer_feature_level(gene_ids)
+    context, context_note = _infer_analysis_context(
+        source=source,
+        data_input=data_input,
+        sample_names=sample_names,
+        default_bulk=False,
+    )
+    _state["feature_level"] = level
+    _state["feature_level_note"] = level_note
+    _state["analysis_context"] = context
+    _state["analysis_context_note"] = context_note
+
     sample_names = None
     if dgelist.get("samples") is not None:
         sdf = dgelist["samples"]
@@ -269,6 +426,11 @@ def load_data_auto(
     lines = [f"Loaded {counts.shape[0]:,} genes × {counts.shape[1]} samples"]
     if sample_names is not None:
         lines.append(f"Samples: {', '.join(sample_names)}")
+    if _state.get("feature_level_note"):
+        lines.append(f"Feature level: {_state['feature_level']} ({_state['feature_level_note']})")
+    if _state.get("analysis_context_note"):
+        lines.append(f"Context: {_state['analysis_context']} ({_state['analysis_context_note']})")
+    _append_gene_level_warning(lines)
     return "\n".join(lines)
 
 
@@ -296,6 +458,19 @@ def describe() -> str:
         lines.append(f"  Norm factors: {', '.join(f'{v:.4f}' for v in nf)}")
 
     lines.append(f"Dispersions estimated: {'yes' if _state['dispersions_estimated'] else 'no'}")
+    fl = _state.get("feature_level", "unknown")
+    note = _state.get("feature_level_note")
+    if note:
+        lines.append(f"Feature level: {fl} ({note})")
+    else:
+        lines.append(f"Feature level: {fl}")
+
+    cx = _state.get("analysis_context", "unknown")
+    cx_note = _state.get("analysis_context_note")
+    if cx_note:
+        lines.append(f"Context: {cx} ({cx_note})")
+    else:
+        lines.append(f"Context: {cx}")
     if _state["dispersions_estimated"]:
         cd = d.get("common.dispersion")
         if cd is not None:
@@ -339,6 +514,10 @@ def reset_state() -> str:
     _state["filtered"] = False
     _state["normalized"] = False
     _state["dispersions_estimated"] = False
+    _state["feature_level"] = "unknown"
+    _state["feature_level_note"] = None
+    _state["analysis_context"] = "unknown"
+    _state["analysis_context_note"] = None
     return "State cleared."
 
 
@@ -881,6 +1060,7 @@ def test_contrast(
             f"{row['PValue']:>10.2e} {row['FDR']:>10.2e}"
         )
 
+    _append_gene_level_warning(lines)
     return "\n".join(lines)
 
 
@@ -930,6 +1110,7 @@ def test_coef(
         f"Test: {method.upper()} — coef {coef}",
         f"DE genes (FDR < 0.05): {n_up} up, {n_down} down, {n_ns} NS",
     ]
+    _append_gene_level_warning(lines)
     return "\n".join(lines)
 
 
@@ -982,6 +1163,7 @@ def glm_lrt_test(
         "Test: LRT",
         f"DE genes (FDR < 0.05): {n_up} up, {n_down} down, {n_ns} NS",
     ]
+    _append_gene_level_warning(lines)
     return "\n".join(lines)
 
 
@@ -1042,6 +1224,7 @@ def exact_test(
         "Test: Exact",
         f"DE genes (FDR < 0.05): {n_up} up, {n_down} down, {n_ns} NS",
     ]
+    _append_gene_level_warning(lines)
     return "\n".join(lines)
 
 
@@ -1103,6 +1286,7 @@ def get_top_genes(
         line += f" {row['PValue']:>10.2e} {row['FDR']:>10.2e} {sig_mark:>3}"
         lines.append(line)
 
+    _append_gene_level_warning(lines)
     return "\n".join(lines)
 
 

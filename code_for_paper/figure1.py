@@ -41,7 +41,7 @@ ax.scatter(x, y, c=BLUE, s=50, alpha=0.8, edgecolors='none', zorder=5)
 lims = [min(x.min(), y.min()) * 0.98, max(x.max(), y.max()) * 1.02]
 ax.plot(lims, lims, 'k-', lw=0.5, alpha=0.5)
 ax.set_xlim(lims); ax.set_ylim(lims)
-ax.set_xlabel('edgeR (R)'); ax.set_ylabel('edgePython')
+ax.set_xlabel('edgeR'); ax.set_ylabel('edgePython')
 ax.set_title('TMM norm factors')
 ax.tick_params(labelsize=7)
 
@@ -57,7 +57,7 @@ ax.scatter(x, y, c=BLUE, **scatter_kw)
 lims = [min(x.min(), y.min()) * 0.9, max(x.max(), y.max()) * 1.05]
 ax.plot(lims, lims, 'k-', lw=0.5, alpha=0.5)
 ax.set_xlim(lims); ax.set_ylim(lims)
-ax.set_xlabel('edgeR (R)'); ax.set_ylabel('edgePython')
+ax.set_xlabel('edgeR'); ax.set_ylabel('edgePython')
 ax.set_title('Tagwise BCV')
 ax.tick_params(labelsize=7)
 
@@ -74,7 +74,7 @@ ax.scatter(x, y, c=BLUE, **scatter_kw)
 lims = [min(x.min(), y.min()) * 1.05, max(x.max(), y.max()) * 1.05]
 ax.plot(lims, lims, 'k-', lw=0.5, alpha=0.5)
 ax.set_xlim(lims); ax.set_ylim(lims)
-ax.set_xlabel('edgeR (R)'); ax.set_ylabel('edgePython')
+ax.set_xlabel('edgeR'); ax.set_ylabel('edgePython')
 ax.set_title('QL F-test logFC')
 ax.tick_params(labelsize=7)
 
@@ -91,7 +91,7 @@ ax.scatter(x, y, c=BLUE, **scatter_kw)
 lims = [min(x.min(), y.min()) * 0.9, max(x.max(), y.max()) * 1.05]
 ax.plot(lims, lims, 'k-', lw=0.5, alpha=0.5)
 ax.set_xlim(lims); ax.set_ylim(lims)
-ax.set_xlabel('edgeR (R)'); ax.set_ylabel('edgePython')
+ax.set_xlabel('edgeR'); ax.set_ylabel('edgePython')
 ax.set_title(r'QL posterior $s^2_{\mathrm{post}}$')
 ax.tick_params(labelsize=7)
 
@@ -114,7 +114,7 @@ ax.scatter(x, y, c=BLUE, **scatter_kw)
 lims = [0, max(x.max(), y.max()) * 1.05]
 ax.plot(lims, lims, 'k-', lw=0.5, alpha=0.5)
 ax.set_xlim(lims); ax.set_ylim(lims)
-ax.set_xlabel('edgeR (R)'); ax.set_ylabel('edgePython')
+ax.set_xlabel('edgeR'); ax.set_ylabel('edgePython')
 ax.set_title(r'Exact test $-\log_{10}(p)$')
 ax.tick_params(labelsize=7)
 
@@ -133,7 +133,7 @@ ax.scatter(x, y, c=BLUE, **scatter_kw)
 lims = [0, max(x.max(), y.max()) * 1.05]
 ax.plot(lims, lims, 'k-', lw=0.5, alpha=0.5)
 ax.set_xlim(lims); ax.set_ylim(lims)
-ax.set_xlabel('edgeR (R)'); ax.set_ylabel('edgePython')
+ax.set_xlabel('edgeR'); ax.set_ylabel('edgePython')
 ax.set_title(r'QL F-test $-\log_{10}(p)$')
 ax.tick_params(labelsize=7)
 
@@ -152,7 +152,7 @@ ax.scatter(x, y, c=BLUE, s=10, alpha=0.6, edgecolors='none', rasterized=True)
 lims = [0, max(x.max(), y.max()) * 1.05]
 ax.plot(lims, lims, 'k-', lw=0.5, alpha=0.5)
 ax.set_xlim(lims); ax.set_ylim(lims)
-ax.set_xlabel('edgeR (R)'); ax.set_ylabel('edgePython')
+ax.set_xlabel('edgeR'); ax.set_ylabel('edgePython')
 ax.set_title(r'LRT TREAT $-\log_{10}(p)$')
 ax.tick_params(labelsize=7)
 
@@ -173,7 +173,7 @@ ax.scatter(x, y, c=BLUE, **scatter_kw)
 lims = [0, max(x.max(), y.max()) * 1.05]
 ax.plot(lims, lims, 'k-', lw=0.5, alpha=0.5)
 ax.set_xlim(lims); ax.set_ylim(lims)
-ax.set_xlabel('edgeR (R)'); ax.set_ylabel('edgePython')
+ax.set_xlabel('edgeR'); ax.set_ylabel('edgePython')
 ax.set_title(r'QL F-test $-\log_{10}(p)$ (Galaxy)')
 ax.tick_params(labelsize=7)
 
@@ -198,7 +198,7 @@ ax.scatter(x, y, c=BLUE, **scatter_kw)
 lims = [0, max(x.max(), y.max()) * 1.05]
 ax.plot(lims, lims, 'k-', lw=0.5, alpha=0.5)
 ax.set_xlim(lims); ax.set_ylim(lims)
-ax.set_xlabel('edgeR (R)'); ax.set_ylabel('edgePython')
+ax.set_xlabel('edgeR'); ax.set_ylabel('edgePython')
 ax.set_title(r'TREAT $-\log_{10}(p)$ (Galaxy)')
 ax.tick_params(labelsize=7)
 
@@ -212,7 +212,7 @@ ax.scatter(x, y, c=BLUE, s=2, alpha=0.15, edgecolors='none', rasterized=True)
 lims = [min(x.min(), y.min()) * 1.05, max(x.max(), y.max()) * 1.05]
 ax.plot(lims, lims, 'k-', lw=0.5, alpha=0.5)
 ax.set_xlim(lims); ax.set_ylim(lims)
-ax.set_xlabel('edgeR (R)'); ax.set_ylabel('edgePython')
+ax.set_xlabel('edgeR'); ax.set_ylabel('edgePython')
 ax.set_title('GLM coefficients')
 ax.tick_params(labelsize=7)
 
@@ -233,7 +233,7 @@ ax.scatter(x, y, c=BLUE, **scatter_kw)
 lims = [0, max(x.max(), y.max()) * 1.05]
 ax.plot(lims, lims, 'k-', lw=0.5, alpha=0.5)
 ax.set_xlim(lims); ax.set_ylim(lims)
-ax.set_xlabel('edgeR (R)'); ax.set_ylabel('edgePython')
+ax.set_xlabel('edgeR'); ax.set_ylabel('edgePython')
 ax.set_title(r'Interaction $-\log_{10}(p)$')
 ax.tick_params(labelsize=7)
 
@@ -252,7 +252,7 @@ ax.scatter(x, y, c=BLUE, s=20, alpha=0.7, edgecolors='none')
 lims = [0, max(x.max(), y.max()) * 1.1]
 ax.plot(lims, lims, 'k-', lw=0.5, alpha=0.5)
 ax.set_xlim(lims); ax.set_ylim(lims)
-ax.set_xlabel('edgeR (R)'); ax.set_ylabel('edgePython')
+ax.set_xlabel('edgeR'); ax.set_ylabel('edgePython')
 ax.set_title(r'camera $-\log_{10}(p)$')
 ax.tick_params(labelsize=7)
 
@@ -276,7 +276,7 @@ ax.scatter(x, y, c=BLUE, s=20, alpha=0.7, edgecolors='none')
 lims = [0, max(x.max(), y.max()) * 1.1]
 ax.plot(lims, lims, 'k-', lw=0.5, alpha=0.5)
 ax.set_xlim(lims); ax.set_ylim(lims)
-ax.set_xlabel('edgeR (R)'); ax.set_ylabel('edgePython')
+ax.set_xlabel('edgeR'); ax.set_ylabel('edgePython')
 ax.set_title(r'fry $-\log_{10}(p)$')
 ax.tick_params(labelsize=7)
 
@@ -295,7 +295,7 @@ ax.scatter(x, y, c=BLUE, **scatter_kw)
 lims = [0, max(x.max(), y.max()) * 1.05]
 ax.plot(lims, lims, 'k-', lw=0.5, alpha=0.5)
 ax.set_xlim(lims); ax.set_ylim(lims)
-ax.set_xlabel('edgeR (R)'); ax.set_ylabel('edgePython')
+ax.set_xlabel('edgeR'); ax.set_ylabel('edgePython')
 ax.set_title(r'DTU gene $-\log_{10}(p)$')
 ax.tick_params(labelsize=7)
 
@@ -311,7 +311,7 @@ ax.scatter(x, y, c=BLUE, **scatter_kw)
 lims = [0, max(x.max(), y.max()) * 1.05]
 ax.plot(lims, lims, 'k-', lw=0.5, alpha=0.5)
 ax.set_xlim(lims); ax.set_ylim(lims)
-ax.set_xlabel('edgeR (R)'); ax.set_ylabel('edgePython')
+ax.set_xlabel('edgeR'); ax.set_ylabel('edgePython')
 ax.set_title(r'DTU exon $-\log_{10}(p)$')
 ax.tick_params(labelsize=7)
 
@@ -330,7 +330,7 @@ ax.scatter(x, y, c=BLUE, **scatter_kw)
 lims = [0, max(x.max(), y.max()) * 1.05]
 ax.plot(lims, lims, 'k-', lw=0.5, alpha=0.5)
 ax.set_xlim(lims); ax.set_ylim(lims)
-ax.set_xlabel('edgeR (R)'); ax.set_ylabel('edgePython')
+ax.set_xlabel('edgeR'); ax.set_ylabel('edgePython')
 ax.set_title(r'Scaled QL $-\log_{10}(p)$')
 ax.tick_params(labelsize=7)
 

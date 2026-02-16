@@ -58,7 +58,7 @@ jitter_strip(ax, [0, 1],
              [bulk_r_times, bulk_py_times],
              [COLOR_R, COLOR_PY])
 ax.set_xticks([0, 1])
-ax.set_xticklabels(['R (edgeR)', 'Python\n(edgePython)'], fontsize=8)
+ax.set_xticklabels(['edgeR', 'edgePython'], fontsize=8)
 ax.set_ylabel('Time (seconds)')
 ax.set_title('Bulk RNA-seq (HOXA1)')
 ax.set_xlim(-0.5, 1.5)
@@ -71,7 +71,7 @@ jitter_strip(ax, [0, 1],
              [sc_r_times, sc_py_times],
              [COLOR_R, COLOR_PY])
 ax.set_xticks([0, 1])
-ax.set_xticklabels(['R (NEBULA)', 'Python\n(edgePython)'], fontsize=8)
+ax.set_xticklabels(['NEBULA', 'edgePython'], fontsize=8)
 ax.set_ylabel('Time (seconds)')
 ax.set_title(r'Single-cell (\textit{Clytia})')
 ax.set_xlim(-0.5, 1.5)
