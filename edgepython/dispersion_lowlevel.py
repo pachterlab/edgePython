@@ -252,120 +252,147 @@ def adjusted_profile_lik(dispersion, y, design, offset, weights=None,
 
 
 @njit(cache=True)
-def _maximize_interpolant_kernel(x, y, ngenes, npts, n_fine, result):
-    """Numba kernel for maximize_interpolant: cubic spline interpolation + argmax."""
-    n_intervals = npts - 1
+def _fmm_spline(n, x, y, b, c, d):
+    """Forsythe-Malcolm-Moler cubic spline (matches R's splines.c / edgeR's fmm_spline).
 
-    # Compute h = diff(x)
-    h = np.empty(n_intervals)
-    for i in range(n_intervals):
-        h[i] = x[i + 1] - x[i]
+    Computes coefficients b, c, d such that in segment i:
+        S(t) = y[i] + b[i]*t + c[i]*t^2 + d[i]*t^3
+    where t = x_eval - x[i].
+    """
+    if n < 2:
+        return
+    if n < 3:
+        t = (y[1] - y[0]) / (x[1] - x[0])
+        b[0] = t
+        b[1] = t
+        c[0] = c[1] = d[0] = d[1] = 0.0
+        return
 
-    # x_fine = linspace(x[0], x[-1], n_fine)
-    x_fine = np.empty(n_fine)
-    if n_fine == 1:
-        x_fine[0] = x[0]
-    else:
-        step = (x[npts - 1] - x[0]) / (n_fine - 1)
-        for i in range(n_fine):
-            x_fine[i] = x[0] + i * step
+    nm1 = n - 1
 
-    # Compute c_prime for Thomas algorithm (shared across genes)
-    ni = npts - 2  # number of interior points
-    c_prime = np.zeros(max(ni, 1))
-    if ni > 0:
-        diag = np.empty(ni)
-        for i in range(ni):
-            diag[i] = 2.0 * (h[i] + h[i + 1])
-        # upper and lower are both h[1:-1], i.e. h[i+1] for i=0..ni-2
-        if ni > 1:
-            c_prime[0] = h[1] / diag[0]
-            for i in range(1, ni):
-                denom = diag[i] - h[i] * c_prime[i - 1]
-                c_prime[i] = (h[i + 1] / denom) if i < ni - 1 else 0.0
-        else:
-            c_prime[0] = 0.0
+    # Set up tridiagonal system
+    # Using d for offdiagonal, b for diagonal, c for RHS
+    d[0] = x[1] - x[0]
+    c[1] = (y[1] - y[0]) / d[0]
+    for i in range(1, nm1):
+        d[i] = x[i + 1] - x[i]
+        b[i] = 2.0 * (d[i - 1] + d[i])
+        c[i + 1] = (y[i + 1] - y[i]) / d[i]
+        c[i] = c[i + 1] - c[i]
 
-    # Pre-compute interval indices for x_fine
-    intervals = np.empty(n_fine, dtype=np.int64)
-    for i in range(n_fine):
-        # searchsorted right - 1
-        lo_idx = 0
-        hi_idx = npts
-        while lo_idx < hi_idx:
-            mid = (lo_idx + hi_idx) // 2
-            if x[mid] <= x_fine[i]:
-                lo_idx = mid + 1
-            else:
-                hi_idx = mid
-        idx = lo_idx - 1
-        if idx < 0:
-            idx = 0
-        if idx > n_intervals - 1:
-            idx = n_intervals - 1
-        intervals[i] = idx
+    # End conditions (FMM: match third derivatives)
+    b[0] = -d[0]
+    b[nm1] = -d[nm1 - 1]
+    c[0] = 0.0
+    c[nm1] = 0.0
+    if n > 3:
+        c[0] = c[2] / (x[3] - x[1]) - c[1] / (x[2] - x[0])
+        c[nm1] = c[nm1 - 1] / (x[nm1] - x[nm1 - 2]) - c[nm1 - 2] / (x[nm1 - 1] - x[nm1 - 3])
+        c[0] = c[0] * d[0] * d[0] / (x[3] - x[0])
+        c[nm1] = -c[nm1] * d[nm1 - 1] * d[nm1 - 1] / (x[nm1] - x[nm1 - 3])
 
-    # Per-gene: Thomas algorithm + spline eval + argmax
+    # Gaussian elimination
+    for i in range(1, n):
+        t = d[i - 1] / b[i - 1]
+        b[i] = b[i] - t * d[i - 1]
+        c[i] = c[i] - t * c[i - 1]
+
+    # Backward substitution
+    c[nm1] = c[nm1] / b[nm1]
+    for i in range(nm1 - 1, -1, -1):
+        c[i] = (c[i] - d[i] * c[i + 1]) / b[i]
+
+    # Compute polynomial coefficients
+    b[nm1] = (y[nm1] - y[nm1 - 1]) / d[nm1 - 1] + d[nm1 - 1] * (c[nm1 - 1] + 2.0 * c[nm1])
+    for i in range(nm1):
+        b[i] = (y[i + 1] - y[i]) / d[i] - d[i] * (c[i + 1] + 2.0 * c[i])
+        d[i] = (c[i + 1] - c[i]) / d[i]
+        c[i] = 3.0 * c[i]
+    c[nm1] = 3.0 * c[nm1]
+    d[nm1] = d[nm1 - 1]
+
+
+@njit(cache=True)
+def _maximize_interpolant_kernel(x, y_mat, ngenes, npts, result):
+    """Numba kernel: FMM spline + analytical max (matches edgeR's C find_max).
+
+    For each gene, fits an FMM cubic spline, finds the grid point with the
+    highest value, then analytically solves for the maximum on the two
+    neighbouring segments by finding roots of the derivative (a quadratic).
+    This is O(npts) per gene with no discretisation artifacts.
+    """
+    b = np.empty(npts)
+    c = np.empty(npts)
+    d = np.empty(npts)
+    y_row = np.empty(npts)
+
     for g in range(ngenes):
-        if ni > 0:
-            # Compute slopes and RHS for this gene
-            # slopes[i] = (y[g,i+1] - y[g,i]) / h[i]
-            # rhs_int[i] = 6*(slopes[i+1] - slopes[i])
-            d_prime = np.empty(ni)
+        # Copy row (fmm_spline modifies y in-place via c)
+        for i in range(npts):
+            y_row[i] = y_mat[g, i]
 
-            # First d_prime
-            s0 = (y[g, 1] - y[g, 0]) / h[0]
-            s1 = (y[g, 2] - y[g, 1]) / h[1]
-            rhs0 = 6.0 * (s1 - s0)
-            d_prime[0] = rhs0 / diag[0]
+        # Find coarse grid maximum
+        maxed = y_row[0]
+        maxed_at = 0
+        for i in range(1, npts):
+            if y_row[i] > maxed:
+                maxed = y_row[i]
+                maxed_at = i
+        x_max = x[maxed_at]
 
-            s_prev = s1
-            for i in range(1, ni):
-                s_cur = (y[g, i + 2] - y[g, i + 1]) / h[i + 1]
-                rhs_i = 6.0 * (s_cur - s_prev)
-                denom = diag[i] - h[i] * c_prime[i - 1]
-                d_prime[i] = (rhs_i - h[i] * d_prime[i - 1]) / denom
-                s_prev = s_cur
+        # Fit FMM spline: S(t) = y[i] + b[i]*t + c[i]*t^2 + d[i]*t^3
+        _fmm_spline(npts, x, y_row, b, c, d)
 
-            # Back substitution -> m_int
-            m_int = np.empty(ni)
-            m_int[ni - 1] = d_prime[ni - 1]
-            for i in range(ni - 2, -1, -1):
-                m_int[i] = d_prime[i] - c_prime[i] * m_int[i + 1]
+        # Check left segment (maxed_at - 1)
+        if maxed_at > 0:
+            seg = maxed_at - 1
+            lb = b[seg]
+            lc = c[seg]
+            ld = d[seg]
 
-            # Build full m (with boundary conditions m[0]=m[-1]=0)
-            m = np.zeros(npts)
-            for i in range(ni):
-                m[i + 1] = m_int[i]
-        else:
-            m = np.zeros(npts)
+            # Derivative: b + 2c*t + 3d*t^2 = 0
+            # Discriminant: (2c)^2 - 4*(3d)*b = 4*(c^2 - 3*d*b)
+            delta = lc * lc - 3.0 * ld * lb
+            if delta >= 0.0:
+                # Solution for maximum (not minimum)
+                numerator = -lc - np.sqrt(delta)
+                chosen_sol = numerator / (3.0 * ld) if ld != 0.0 else 0.0
 
-        # Evaluate spline on fine grid and find max
-        best_val = -1e300
-        best_idx = 0
-        for f in range(n_fine):
-            ii = intervals[f]
-            h_ii = h[ii]
-            dt_left = x[ii + 1] - x_fine[f]
-            dt_right = x_fine[f] - x[ii]
-            h_inv = 1.0 / h_ii
-            h_6 = h_ii / 6.0
+                seg_width = x[maxed_at] - x[seg]
+                if chosen_sol > 0.0 and chosen_sol < seg_width:
+                    temp = ((ld * chosen_sol + lc) * chosen_sol + lb) * chosen_sol + y_row[seg]
+                    if temp > maxed:
+                        maxed = temp
+                        x_max = chosen_sol + x[seg]
 
-            val = (m[ii] * dt_left * dt_left * dt_left * h_inv / 6.0
-                   + m[ii + 1] * dt_right * dt_right * dt_right * h_inv / 6.0
-                   + (y[g, ii] * h_inv - m[ii] * h_6) * dt_left
-                   + (y[g, ii + 1] * h_inv - m[ii + 1] * h_6) * dt_right)
-            if val > best_val:
-                best_val = val
-                best_idx = f
+        # Check right segment (maxed_at)
+        if maxed_at < npts - 1:
+            seg = maxed_at
+            rb = b[seg]
+            rc = c[seg]
+            rd = d[seg]
 
-        result[g] = x_fine[best_idx]
+            delta = rc * rc - 3.0 * rd * rb
+            if delta >= 0.0:
+                numerator = -rc - np.sqrt(delta)
+                chosen_sol = numerator / (3.0 * rd) if rd != 0.0 else 0.0
+
+                seg_width = x[seg + 1] - x[seg]
+                if chosen_sol > 0.0 and chosen_sol < seg_width:
+                    temp = ((rd * chosen_sol + rc) * chosen_sol + rb) * chosen_sol + y_row[seg]
+                    if temp > maxed:
+                        maxed = temp
+                        x_max = chosen_sol + x[seg]
+
+        result[g] = x_max
 
 
 def maximize_interpolant(x, y):
     """Find the maximum of an interpolated function for each row.
 
-    Port of edgeR's maximizeInterpolant (C code reimplemented).
+    Port of edgeR's maximizeInterpolant. Uses FMM cubic spline fitting
+    followed by analytical maximum finding on neighbouring segments,
+    matching R's C implementation exactly.
 
     Parameters
     ----------
@@ -385,13 +412,9 @@ def maximize_interpolant(x, y):
 
     ngenes = y.shape[0]
     npts = len(x)
-    # Use a fine grid dense enough to produce smooth trended dispersions.
-    # The grid spans npts-1 intervals; using ~500 points per interval
-    # ensures the argmax is resolved well below visible discretisation.
-    n_fine = max(10000, 500 * (npts - 1))
 
     result = np.empty(ngenes, dtype=np.float64)
-    _maximize_interpolant_kernel(x, y, ngenes, npts, n_fine, result)
+    _maximize_interpolant_kernel(x, y, ngenes, npts, result)
     return result
 
 
