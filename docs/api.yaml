@@ -1,0 +1,3513 @@
+# edgePython API Documentation
+# Machine-readable specification with typed schema and controlled vocabularies.
+#
+# Schema version: 1.0.0
+# Generated: 2025-02-09
+# Format: YAML 1.2
+
+# =====================================================================
+# Package metadata
+# =====================================================================
+
+package:
+  name: edgePython
+  version: "0.1.0"
+  description: >-
+    Python port of the edgeR Bioconductor package for empirical analysis
+    of digital gene expression data.
+  license: GPL-3.0-or-later
+  upstream:
+    package: edgeR
+    version: "3.36.0"
+    source: Bioconductor
+    url: https://bioconductor.org/packages/edgeR/
+    language: R
+  python_requires: ">=3.8"
+  dependencies:
+    required:
+      - numpy
+      - scipy
+      - pandas
+    optional:
+      - matplotlib  # visualization
+      - anndata     # AnnData interop
+      - h5py        # kallisto HDF5
+      - pybiomart   # nearestTSS gene annotation
+      - gprofiler-official  # goana/kegga enrichment
+      - numba        # JIT compilation for single-cell fitting
+
+# =====================================================================
+# Controlled vocabularies
+# =====================================================================
+
+vocabularies:
+
+  # Functional domain each API belongs to
+  domain:
+    - classes            # Data structures and containers
+    - dgelist            # DGEList construction and accessors
+    - normalization      # Library-size normalization
+    - expression         # Expression-level summaries (CPM, RPKM, TPM)
+    - filtering          # Gene filtering
+    - dispersion         # Dispersion estimation
+    - glm_fitting        # Generalized linear model fitting
+    - glm_testing        # GLM-based differential expression testing
+    - exact_test         # Exact test for two-group comparisons
+    - results            # Results extraction and multiple testing
+    - io                 # Input/output and format conversion
+    - visualization      # Plotting and diagnostics
+    - splicing           # Differential splicing analysis
+    - gene_sets          # Gene set testing / enrichment
+    - utilities          # Statistical and data utilities
+    - limma              # Functions ported from limma
+    - single_cell        # Single-cell NB mixed model (NEBULA-LN)
+
+  # Type of API entry
+  kind:
+    - class
+    - function
+
+  # Parameter data types
+  param_type:
+    - ndarray            # numpy.ndarray
+    - DGEList            # edgePython DGEList dict
+    - DataFrame          # pandas.DataFrame
+    - Series             # pandas.Series
+    - AnnData            # anndata.AnnData
+    - str
+    - int
+    - float
+    - bool
+    - list
+    - dict
+    - tuple
+    - None
+
+  # Return value types
+  return_type:
+    - DGEList
+    - dict               # Generic result dict (DGELRT, DGEExact, etc.)
+    - DataFrame
+    - ndarray
+    - AnnData
+    - tuple
+    - float
+    - int
+    - bool
+    - None
+    - Figure             # matplotlib Figure
+
+  # Normalization methods accepted by calc_norm_factors
+  normalization_method:
+    - TMM
+    - TMMwsp
+    - RLE
+    - upperquartile
+    - none
+
+  # Dispersion trend methods
+  trend_method:
+    - locfit
+    - movingave
+    - loess
+    - none
+
+  # GLM dispersion estimation methods
+  glm_disp_method:
+    - CoxReid
+    - Pearson
+    - deviance
+
+  # Rejection region options for exact test
+  rejection_region:
+    - doubletail
+    - deviance
+    - smallp
+
+  # Multiple testing adjustment methods
+  adjust_method:
+    - BH
+    - bonferroni
+    - holm
+    - hochberg
+    - hommel
+    - BY
+    - none
+
+  # Test statistic sort keys
+  sort_by:
+    - PValue
+    - logFC
+    - logCPM
+    - F
+    - LR
+    - none
+
+  # Null hypothesis types for glmTreat
+  treat_null:
+    - interval
+    - worst.case
+
+  # Test coverage level
+  test_status:
+    - tested                # Has dedicated unit tests
+    - tested_r_comparison   # Has R-vs-Python CSV comparison tests
+    - tested_both           # Has both unit tests and R comparison
+    - untested              # No dedicated tests
+
+  # Implementation status
+  impl_status:
+    - complete              # Fully implemented
+    - partial               # Core logic implemented, optional features missing
+    - delegate              # Delegates to external package
+
+# =====================================================================
+# Citations
+# =====================================================================
+
+citations:
+
+  - id: robinson2008
+    authors:
+      - Robinson MD
+      - Smyth GK
+    year: 2008
+    title: >-
+      Small sample estimation of negative binomial dispersion, with
+      applications to SAGE data
+    journal: Biostatistics
+    volume: 9
+    pages: "321-332"
+    contribution: >-
+      Proposed sharing information between genes by estimating the negative
+      binomial variance parameter globally. Introduced the terminology
+      'dispersion' for the variance parameter. Proposed conditional maximum
+      likelihood for estimating common dispersion. Developed an exact test
+      for differential expression for negative binomial counts.
+    functions:
+      - estimate_common_disp
+      - exact_test
+
+  - id: robinson2007
+    authors:
+      - Robinson MD
+      - Smyth GK
+    year: 2007
+    title: >-
+      Moderated statistical tests for assessing differences in tag abundance
+    journal: Bioinformatics
+    volume: 23
+    pages: "2881-2887"
+    contribution: >-
+      Introduced empirical Bayes moderated dispersion parameter estimation,
+      permitting gene-specific dispersion estimation to be reliable even
+      for small samples.
+    functions:
+      - estimate_tagwise_disp
+      - WLEB
+
+  - id: robinson2010edger
+    authors:
+      - Robinson MD
+      - McCarthy DJ
+      - Smyth GK
+    year: 2010
+    title: >-
+      edgeR: a Bioconductor package for differential expression analysis
+      of digital gene expression data
+    journal: Bioinformatics
+    volume: 26
+    pages: "139-140"
+    contribution: >-
+      Announcement of the edgeR software package. Introduced the terminology
+      'coefficient of biological variation'.
+
+  - id: robinson2010norm
+    authors:
+      - Robinson MD
+      - Oshlack A
+    year: 2010
+    title: >-
+      A scaling normalization method for differential expression analysis
+      of RNA-seq data
+    journal: Genome Biology
+    volume: 11
+    pages: R25
+    contribution: >-
+      Introduced model-based library size normalization for RNA-Seq data.
+      Proposed the TMM normalization method.
+    functions:
+      - calc_norm_factors
+
+  - id: mccarthy2012
+    authors:
+      - McCarthy DJ
+      - Chen Y
+      - Smyth GK
+    year: 2012
+    title: >-
+      Differential expression analysis of multifactor RNA-Seq experiments
+      with respect to biological variation
+    journal: Nucleic Acids Research
+    volume: 40
+    pages: "4288-4297"
+    contribution: >-
+      Extended negative binomial differential expression methods to GLMs.
+      Introduced Cox-Reid approximate conditional maximum likelihood for
+      estimating dispersion parameters with empirical Bayes moderation.
+      Developed fast algorithms for fitting GLMs to thousands of genes
+      in parallel.
+    functions:
+      - glm_fit
+      - glm_lrt
+      - estimate_glm_common_disp
+      - estimate_glm_trended_disp
+      - estimate_glm_tagwise_disp
+
+  - id: lun2016
+    authors:
+      - Lun ATL
+      - Chen Y
+      - Smyth GK
+    year: 2016
+    title: >-
+      It's DE-licious: a recipe for differential expression analyses of
+      RNA-seq experiments using quasi-likelihood methods in edgeR
+    journal: Methods in Molecular Biology
+    volume: 1418
+    pages: "391-416"
+    contribution: >-
+      Explains the glmQLFit and glmQLFTest functions, which replace the
+      chi-square approximation to the likelihood ratio statistic with a
+      quasi-likelihood F-test for more conservative type I error rate control.
+    functions:
+      - glm_ql_fit
+      - glm_ql_ftest
+
+  - id: chen2014
+    authors:
+      - Chen Y
+      - Lun ATL
+      - Smyth GK
+    year: 2014
+    title: >-
+      Differential expression analysis of complex RNA-seq experiments
+      using edgeR
+    publisher: Springer
+    book: Statistical Analysis of Next Generation Sequence Data
+    editors:
+      - Datta S
+      - Nettleton DS
+    contribution: >-
+      Explains the estimateDisp function and the weighted likelihood
+      empirical Bayes method.
+    functions:
+      - estimate_disp
+      - WLEB
+
+  - id: zhou2014
+    authors:
+      - Zhou X
+      - Lindsay H
+      - Robinson MD
+    year: 2014
+    title: >-
+      Robustly detecting differential expression in RNA sequencing data
+      using observation weights
+    journal: Nucleic Acids Research
+    volume: 42
+    pages: e91
+    contribution: >-
+      Explains estimateGLMRobustDisp, designed to make downstream tests
+      by glmLRT robust to outlier observations.
+    functions:
+      - estimate_disp  # robust=True option
+
+  - id: dai2014
+    authors:
+      - Dai Z
+      - Sheridan JM
+      - Gearing LJ
+      - Moore DL
+      - Su S
+      - Wormald S
+      - Wilcox S
+      - O'Connor L
+      - Dickins RA
+      - Blewitt ME
+      - Ritchie ME
+    year: 2014
+    title: >-
+      edgeR: a versatile tool for the analysis of shRNA-seq and CRISPR-Cas9
+      genetic screens
+    journal: F1000Research
+    volume: 3
+    pages: "95"
+    contribution: >-
+      Explains the processAmplicons function for obtaining counts from
+      FASTQ files of shRNA-seq and CRISPR-Cas9 genetic screens.
+
+  - id: chen2016
+    authors:
+      - Chen Y
+      - Lun ATL
+      - Smyth GK
+    year: 2016
+    title: >-
+      From reads to genes to pathways: differential expression analysis
+      of RNA-Seq experiments using Rsubread and the edgeR quasi-likelihood
+      pipeline
+    journal: F1000Research
+    volume: 5
+    pages: "1438"
+    contribution: >-
+      Describes a complete workflow of differential expression and pathway
+      analysis using the edgeR quasi-likelihood pipeline.
+    functions:
+      - glm_ql_fit
+      - glm_ql_ftest
+      - camera
+      - fry
+      - roast
+      - goana
+      - kegga
+
+  - id: chen2017
+    authors:
+      - Chen Y
+      - Pal B
+      - Visvader JE
+      - Smyth GK
+    year: 2017
+    title: >-
+      Differential methylation analysis of reduced representation bisulfite
+      sequencing experiments using edgeR
+    journal: F1000Research
+    volume: 6
+    pages: "2055"
+    contribution: >-
+      Explains a novel approach for detecting differentially methylated
+      regions of RRBS experiments using edgeR.
+    functions:
+      - read_bismark2dge
+      - model_matrix_meth
+
+  - id: baldoni2024a
+    authors:
+      - Baldoni PL
+      - Chen Y
+      - Hediyeh-zadeh S
+      - Liao Y
+      - Dong X
+      - Ritchie ME
+      - Shi W
+      - Smyth GK
+    year: 2024
+    title: >-
+      Dividing out quantification uncertainty allows efficient assessment
+      of differential transcript expression with edgeR
+    journal: Nucleic Acids Research
+    volume: 52
+    pages: e13
+    contribution: >-
+      Differential transcript expression in edgeR using bootstrap sampling
+      and divided-counts.
+    functions:
+      - catch_kallisto
+      - catch_salmon
+
+  - id: baldoni2024b
+    authors:
+      - Baldoni PL
+      - Chen L
+      - Smyth GK
+    year: 2024
+    title: >-
+      Faster and more accurate assessment of differential transcript
+      expression with Gibbs sampling and edgeR v4
+    journal: NAR Genomics and Bioinformatics
+    volume: 6
+    pages: lqae151
+    contribution: >-
+      Differential transcript expression in edgeR using Salmon Gibbs
+      sampling and divided-counts.
+    functions:
+      - catch_salmon
+
+  - id: chen2024
+    authors:
+      - Chen Y
+      - Chen L
+      - Lun ATL
+      - Baldoni PL
+      - Smyth GK
+    year: 2024
+    title: >-
+      edgeR v4: powerful differential analysis of sequencing data with
+      expanded functionality and improved support for small counts and
+      larger datasets
+    journal: bioRxiv
+    doi: "10.1101/2024.01.21.576131"
+    contribution: >-
+      Summarizes all the capabilities of the edgeR package with emphasis
+      on recently added functions.
+
+  - id: he2021
+    authors:
+      - He L
+      - Davila-Velderrain J
+      - Sumida TS
+      - Hafler DA
+      - Bhatt S
+      - Bhatt D
+      - Bhatt DL
+      - Bhatt A
+    year: 2021
+    title: >-
+      NEBULA is a fast negative binomial mixed model for differential or
+      co-expression analysis of large-scale multi-subject single-cell data
+    journal: Communications Biology
+    volume: 4
+    pages: "629"
+    doi: "10.1038/s42003-021-02146-6"
+    contribution: >-
+      Introduced the NEBULA-LN (and NEBULA-HL) algorithm for fitting
+      negative binomial gamma mixed models to single-cell count data with
+      subject-level random intercepts. Uses a two-stage optimizer
+      (L-BFGS-B for initial parameters, penalized ML with Schur
+      complement for refined beta and random effects).
+    functions:
+      - glm_sc_fit
+      - glm_sc_test
+
+# =====================================================================
+# API entries
+# =====================================================================
+
+api:
+
+  # -----------------------------------------------------------------
+  # Classes
+  # -----------------------------------------------------------------
+
+  - name: DGEList
+    kind: class
+    domain: classes
+    module: edgepython.classes
+    r_equivalent: DGEList
+    description: >-
+      Digital Gene Expression data list. Stores counts, sample info,
+      gene annotation, normalization factors, and dispersion estimates.
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_classes.py
+      - test_dgelist.py
+    citations:
+      - robinson2010edger
+
+  - name: DGEExact
+    kind: class
+    domain: classes
+    module: edgepython.classes
+    r_equivalent: DGEExact
+    description: >-
+      Results of an exact test for differential expression between two groups.
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_classes.py
+      - test_exact_test.py
+    citations:
+      - robinson2008
+
+  - name: DGEGLM
+    kind: class
+    domain: classes
+    module: edgepython.classes
+    r_equivalent: DGEGLM
+    description: >-
+      Fitted generalized linear model object for DGE data.
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_classes.py
+      - test_glm.py
+    citations:
+      - mccarthy2012
+
+  - name: DGELRT
+    kind: class
+    domain: classes
+    module: edgepython.classes
+    r_equivalent: DGELRT
+    description: >-
+      Likelihood ratio test results for DGE generalized linear models.
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_classes.py
+      - test_glm.py
+    citations:
+      - mccarthy2012
+
+  - name: TopTags
+    kind: class
+    domain: classes
+    module: edgepython.classes
+    r_equivalent: TopTags
+    description: >-
+      Top differentially expressed genes with adjusted p-values.
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_classes.py
+      - test_glm.py
+      - test_treat.py
+    citations:
+      - robinson2010edger
+
+  - name: CompressedMatrix
+    kind: class
+    domain: classes
+    module: edgepython.compressed_matrix
+    r_equivalent: makeCompressedMatrix
+    description: >-
+      Memory-efficient matrix storing repeated rows or columns compactly.
+      Supports scalar, row-vector, column-vector, and full-matrix storage.
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_classes.py
+
+  - name: cbind_dgelist
+    kind: function
+    domain: classes
+    module: edgepython.classes
+    r_equivalent: cbind.DGEList
+    description: >-
+      Column-bind (combine samples from) multiple DGEList objects.
+    params:
+      - name: objects
+        type: DGEList
+        description: One or more DGEList dicts to combine by column
+        variadic: true
+    returns:
+      type: DGEList
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_dgelist.py
+
+  - name: rbind_dgelist
+    kind: function
+    domain: classes
+    module: edgepython.classes
+    r_equivalent: rbind.DGEList
+    description: >-
+      Row-bind (combine genes from) multiple DGEList objects.
+    params:
+      - name: objects
+        type: DGEList
+        description: One or more DGEList dicts to combine by row
+        variadic: true
+    returns:
+      type: DGEList
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_dgelist.py
+
+  # -----------------------------------------------------------------
+  # DGEList construction and accessors
+  # -----------------------------------------------------------------
+
+  - name: make_dgelist
+    kind: function
+    domain: dgelist
+    module: edgepython.dgelist
+    r_equivalent: DGEList
+    description: >-
+      Construct a DGEList object from a count matrix and optional metadata.
+    params:
+      - name: counts
+        type: ndarray
+        description: Integer count matrix (genes x samples)
+        required: true
+      - name: lib_size
+        type: ndarray
+        description: Library sizes. If None, computed as column sums.
+      - name: norm_factors
+        type: ndarray
+        description: Normalization factors. Defaults to ones.
+      - name: samples
+        type: DataFrame
+        description: Sample-level metadata DataFrame.
+      - name: group
+        type: ndarray
+        description: Group labels for each sample.
+      - name: genes
+        type: DataFrame
+        description: Gene-level annotation DataFrame.
+      - name: remove_zeros
+        type: bool
+        description: Remove rows with all-zero counts.
+        default: false
+      - name: annotation_columns
+        type: list
+        description: Column names to treat as gene annotation.
+    returns:
+      type: DGEList
+    impl_status: complete
+    test_status: tested_both
+    test_files:
+      - test_dgelist.py
+      - test_r_vs_py.py
+    citations:
+      - robinson2010edger
+
+  - name: valid_dgelist
+    kind: function
+    domain: dgelist
+    module: edgepython.dgelist
+    r_equivalent: validDGEList
+    description: >-
+      Check and fill standard components of a DGEList.
+    params:
+      - name: "y"
+        type: DGEList
+        required: true
+    returns:
+      type: DGEList
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_dgelist.py
+
+  - name: get_counts
+    kind: function
+    domain: dgelist
+    module: edgepython.dgelist
+    r_equivalent: getCounts
+    description: >-
+      Extract the count matrix from a DGEList.
+    params:
+      - name: "y"
+        type: DGEList
+        required: true
+    returns:
+      type: ndarray
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_dgelist.py
+
+  - name: get_dispersion
+    kind: function
+    domain: dgelist
+    module: edgepython.dgelist
+    r_equivalent: getDispersion
+    description: >-
+      Get the most complex dispersion values from a DGEList.
+      Priority: tagwise > trended > common > None.
+    params:
+      - name: "y"
+        type: DGEList
+        required: true
+    returns:
+      type: ndarray
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_dgelist.py
+      - test_dispersion.py
+
+  - name: get_dispersion_type
+    kind: function
+    domain: dgelist
+    module: edgepython.dgelist
+    r_equivalent: getDispersion
+    description: >-
+      Get the type name of the most complex dispersion in a DGEList.
+    params:
+      - name: "y"
+        type: DGEList
+        required: true
+    returns:
+      type: str
+    impl_status: complete
+    test_status: untested
+
+  - name: get_offset
+    kind: function
+    domain: dgelist
+    module: edgepython.dgelist
+    r_equivalent: getOffset
+    description: >-
+      Extract offset matrix from a DGEList. Returns log(lib.size * norm.factors)
+      by default.
+    params:
+      - name: "y"
+        type: DGEList
+        required: true
+    returns:
+      type: ndarray
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_dgelist.py
+
+  - name: get_norm_lib_sizes
+    kind: function
+    domain: dgelist
+    module: edgepython.dgelist
+    r_equivalent: getNormLibSizes
+    description: >-
+      Get effective (normalized) library sizes: lib.size * norm.factors.
+    params:
+      - name: "y"
+        type: DGEList
+        required: true
+      - name: log
+        type: bool
+        description: Return log-transformed sizes.
+        default: false
+    returns:
+      type: ndarray
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_expression.py
+      - test_utilities.py
+
+  # -----------------------------------------------------------------
+  # Normalization
+  # -----------------------------------------------------------------
+
+  - name: calc_norm_factors
+    kind: function
+    domain: normalization
+    module: edgepython.normalization
+    r_equivalent: calcNormFactors
+    description: >-
+      Calculate normalization factors to align library sizes.
+    params:
+      - name: counts
+        type: [DGEList, ndarray]
+        description: Count matrix or DGEList.
+        required: true
+      - name: lib_size
+        type: ndarray
+        description: Library sizes.
+      - name: method
+        type: str
+        description: Normalization method.
+        default: TMM
+        vocabulary: normalization_method
+      - name: ref_column
+        type: int
+        description: Reference column for TMM.
+      - name: logratio_trim
+        type: float
+        default: 0.3
+      - name: sum_trim
+        type: float
+        default: 0.05
+      - name: do_weighting
+        type: bool
+        default: true
+      - name: a_cutoff
+        type: float
+        default: -1e10
+      - name: p
+        type: float
+        description: Quantile for upperquartile method.
+        default: 0.75
+    returns:
+      type: [DGEList, ndarray]
+    impl_status: complete
+    test_status: tested_both
+    test_files:
+      - test_dgelist.py
+      - test_r_vs_py.py
+    citations:
+      - robinson2010norm
+
+  - name: normalize_chip_to_input
+    kind: function
+    domain: normalization
+    module: edgepython.normalization
+    r_equivalent: normalizeChIPtoInput
+    description: >-
+      Normalize ChIP-Seq read counts to input control values, then test
+      for significant enrichment relative to the control.  Works on one
+      sample at a time.  Iteratively estimates a scaling factor and the
+      proportion of enriched features using a negative binomial model.
+    params:
+      - name: input_counts
+        type: ndarray
+        description: Non-negative input control counts per feature.
+        required: true
+      - name: response
+        type: ndarray
+        description: Non-negative integer ChIP-Seq mark counts per feature.
+        required: true
+      - name: dispersion
+        type: float
+        description: Negative binomial dispersion (must be positive).
+        default: 0.01
+      - name: niter
+        type: int
+        description: Number of iterations.
+        default: 6
+      - name: loss
+        type: str
+        description: "Loss function: 'p' (cumulative probabilities) or 'z' (z-value)."
+        default: p
+      - name: verbose
+        type: bool
+        description: Print working estimates at each iteration.
+        default: false
+    returns:
+      type: dict
+      description: >-
+        Dictionary with keys p_value, pmid_value, scaling_factor,
+        and prop_enriched.
+    impl_status: complete
+    test_status: untested
+
+  - name: calc_norm_offsets_for_chip
+    kind: function
+    domain: normalization
+    module: edgepython.normalization
+    r_equivalent: calcNormOffsetsforChIP
+    description: >-
+      Compute normalization offsets for ChIP-Seq relative to input.
+      Calls normalize_chip_to_input for each sample and returns a
+      matrix of log-scale offsets suitable for GLM fitting.
+    params:
+      - name: input_counts
+        type: ndarray
+        description: Input control count matrix (genes x samples) or single column.
+        required: true
+      - name: response
+        type: [DGEList, ndarray]
+        description: ChIP-Seq mark count matrix or DGEList.
+        required: true
+      - name: dispersion
+        type: float
+        description: Negative binomial dispersion (must be positive).
+        default: 0.01
+      - name: niter
+        type: int
+        description: Number of iterations.
+        default: 6
+      - name: loss
+        type: str
+        description: "Loss function: 'p' or 'z'."
+        default: p
+      - name: verbose
+        type: bool
+        description: Print working estimates at each iteration.
+        default: false
+    returns:
+      type: [DGEList, ndarray]
+      description: >-
+        If response is a DGEList, returns it with offset field set.
+        Otherwise returns a numeric offset matrix.
+    impl_status: complete
+    test_status: untested
+
+  # -----------------------------------------------------------------
+  # Expression
+  # -----------------------------------------------------------------
+
+  - name: cpm
+    kind: function
+    domain: expression
+    module: edgepython.expression
+    r_equivalent: cpm
+    description: >-
+      Counts per million mapped reads.
+    params:
+      - name: "y"
+        type: [DGEList, ndarray]
+        required: true
+      - name: lib_size
+        type: ndarray
+      - name: offset
+        type: ndarray
+      - name: log
+        type: bool
+        default: false
+      - name: prior_count
+        type: float
+        default: 2
+      - name: normalized_lib_sizes
+        type: bool
+        default: true
+    returns:
+      type: ndarray
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_expression.py
+    citations:
+      - robinson2010edger
+
+  - name: rpkm
+    kind: function
+    domain: expression
+    module: edgepython.expression
+    r_equivalent: rpkm
+    description: >-
+      Reads per kilobase per million mapped reads.
+    params:
+      - name: "y"
+        type: [DGEList, ndarray]
+        required: true
+      - name: gene_length
+        type: ndarray
+        required: true
+      - name: lib_size
+        type: ndarray
+      - name: offset
+        type: ndarray
+      - name: log
+        type: bool
+        default: false
+      - name: prior_count
+        type: float
+        default: 2
+      - name: normalized_lib_sizes
+        type: bool
+        default: true
+    returns:
+      type: ndarray
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_expression.py
+    citations:
+      - robinson2010edger
+
+  - name: tpm
+    kind: function
+    domain: expression
+    module: edgepython.expression
+    r_equivalent: tpm
+    description: >-
+      Transcripts per million from effective transcript lengths.
+    params:
+      - name: "y"
+        type: [DGEList, ndarray]
+        required: true
+      - name: effective_tx_length
+        type: ndarray
+        required: true
+      - name: rta_overdispersion
+        type: ndarray
+      - name: shrunk
+        type: bool
+        default: false
+    returns:
+      type: ndarray
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_expression.py
+
+  - name: ave_log_cpm
+    kind: function
+    domain: expression
+    module: edgepython.expression
+    r_equivalent: aveLogCPM
+    description: >-
+      Average log2 counts per million for each gene across all libraries.
+    params:
+      - name: "y"
+        type: [DGEList, ndarray]
+        required: true
+      - name: lib_size
+        type: ndarray
+      - name: offset
+        type: ndarray
+      - name: prior_count
+        type: float
+        default: 2
+      - name: dispersion
+        type: float
+      - name: weights
+        type: ndarray
+      - name: normalized_lib_sizes
+        type: bool
+        default: true
+    returns:
+      type: ndarray
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_expression.py
+    citations:
+      - mccarthy2012
+
+  - name: cpm_by_group
+    kind: function
+    domain: expression
+    module: edgepython.expression
+    r_equivalent: cpmByGroup
+    description: >-
+      Average CPM within each group of samples.
+    params:
+      - name: "y"
+        type: [DGEList, ndarray]
+        required: true
+      - name: group
+        type: ndarray
+      - name: dispersion
+        type: float
+        default: 0.05
+      - name: offset
+        type: ndarray
+      - name: weights
+        type: ndarray
+      - name: log
+        type: bool
+        default: false
+      - name: prior_count
+        type: float
+        default: 2
+    returns:
+      type: ndarray
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_expression.py
+
+  - name: rpkm_by_group
+    kind: function
+    domain: expression
+    module: edgepython.expression
+    r_equivalent: rpkmByGroup
+    description: >-
+      Average RPKM within each group of samples.
+    params:
+      - name: "y"
+        type: [DGEList, ndarray]
+        required: true
+      - name: group
+        type: ndarray
+      - name: gene_length
+        type: ndarray
+      - name: dispersion
+        type: float
+        default: 0.05
+      - name: offset
+        type: ndarray
+      - name: weights
+        type: ndarray
+      - name: log
+        type: bool
+        default: false
+      - name: prior_count
+        type: float
+        default: 2
+    returns:
+      type: ndarray
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_expression.py
+
+  # -----------------------------------------------------------------
+  # Filtering
+  # -----------------------------------------------------------------
+
+  - name: filter_by_expr
+    kind: function
+    domain: filtering
+    module: edgepython.filtering
+    r_equivalent: filterByExpr
+    description: >-
+      Determine which genes have sufficiently large counts to be retained
+      in a statistical analysis.
+    params:
+      - name: "y"
+        type: [DGEList, ndarray]
+        required: true
+      - name: design
+        type: ndarray
+      - name: group
+        type: ndarray
+      - name: lib_size
+        type: ndarray
+      - name: min_count
+        type: int
+        default: 10
+      - name: min_total_count
+        type: int
+        default: 15
+      - name: large_n
+        type: int
+        default: 10
+      - name: min_prop
+        type: float
+        default: 0.7
+    returns:
+      type: ndarray
+      description: Boolean array indicating which genes to keep.
+    impl_status: complete
+    test_status: tested_both
+    test_files:
+      - test_dgelist.py
+      - test_r_vs_py.py
+
+  # -----------------------------------------------------------------
+  # Dispersion estimation
+  # -----------------------------------------------------------------
+
+  - name: estimate_disp
+    kind: function
+    domain: dispersion
+    module: edgepython.dispersion
+    r_equivalent: estimateDisp
+    description: >-
+      Estimate common, trended, and tagwise dispersions in one call using
+      weighted likelihood empirical Bayes.
+    params:
+      - name: "y"
+        type: DGEList
+        required: true
+      - name: design
+        type: ndarray
+      - name: group
+        type: ndarray
+      - name: lib_size
+        type: ndarray
+      - name: offset
+        type: ndarray
+      - name: prior_df
+        type: float
+      - name: trend_method
+        type: str
+        default: locfit
+        vocabulary: trend_method
+      - name: tagwise
+        type: bool
+        default: true
+      - name: span
+        type: float
+      - name: legacy_span
+        type: bool
+        default: false
+      - name: min_row_sum
+        type: int
+        default: 5
+      - name: grid_length
+        type: int
+        default: 21
+      - name: grid_range
+        type: tuple
+        default: [-10, 10]
+      - name: robust
+        type: bool
+        default: false
+      - name: winsor_tail_p
+        type: tuple
+        default: [0.05, 0.1]
+      - name: tol
+        type: float
+        default: 1e-6
+      - name: weights
+        type: ndarray
+    returns:
+      type: DGEList
+    impl_status: complete
+    test_status: tested_both
+    test_files:
+      - test_dispersion.py
+      - test_r_vs_py.py
+    citations:
+      - chen2014
+      - mccarthy2012
+
+  - name: WLEB
+    kind: function
+    domain: dispersion
+    module: edgepython.dispersion
+    r_equivalent: WLEB
+    description: >-
+      Weighted Likelihood Empirical Bayes estimation of genewise dispersions
+      with an overall prior, optional trend, and individual shrinkage.
+    params:
+      - name: theta
+        type: ndarray
+        required: true
+      - name: loglik
+        type: ndarray
+        required: true
+      - name: prior_n
+        type: float
+        default: 5
+      - name: covariate
+        type: ndarray
+      - name: trend_method
+        type: str
+        default: locfit
+        vocabulary: trend_method
+      - name: span
+        type: float
+      - name: legacy_span
+        type: bool
+        default: false
+      - name: overall
+        type: bool
+        default: true
+      - name: trend
+        type: bool
+        default: true
+      - name: individual
+        type: bool
+        default: true
+      - name: m0
+        type: ndarray
+      - name: m0_out
+        type: bool
+        default: false
+    returns:
+      type: dict
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_classes.py
+      - test_dispersion.py
+    citations:
+      - robinson2007
+      - chen2014
+
+  - name: estimate_common_disp
+    kind: function
+    domain: dispersion
+    module: edgepython.dispersion
+    r_equivalent: estimateCommonDisp
+    description: >-
+      Estimate a common dispersion value across all genes using exact
+      conditional likelihood.
+    params:
+      - name: "y"
+        type: DGEList
+        required: true
+      - name: group
+        type: ndarray
+      - name: lib_size
+        type: ndarray
+      - name: tol
+        type: float
+        default: 1e-6
+      - name: rowsum_filter
+        type: int
+        default: 5
+      - name: verbose
+        type: bool
+        default: false
+    returns:
+      type: DGEList
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_dispersion.py
+    citations:
+      - robinson2008
+
+  - name: estimate_tagwise_disp
+    kind: function
+    domain: dispersion
+    module: edgepython.dispersion
+    r_equivalent: estimateTagwiseDisp
+    description: >-
+      Estimate tagwise (gene-specific) dispersions by empirical Bayes
+      shrinkage from common dispersion.
+    params:
+      - name: "y"
+        type: DGEList
+        required: true
+      - name: group
+        type: ndarray
+      - name: lib_size
+        type: ndarray
+      - name: dispersion
+        type: float
+      - name: prior_df
+        type: float
+        default: 10
+      - name: trend
+        type: str
+        default: movingave
+        vocabulary: trend_method
+      - name: span
+        type: float
+      - name: method
+        type: str
+        default: grid
+      - name: grid_length
+        type: int
+        default: 11
+      - name: grid_range
+        type: tuple
+        default: [-6, 6]
+      - name: tol
+        type: float
+        default: 1e-6
+      - name: verbose
+        type: bool
+        default: false
+    returns:
+      type: DGEList
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_dispersion.py
+    citations:
+      - robinson2007
+
+  - name: estimate_trended_disp
+    kind: function
+    domain: dispersion
+    module: edgepython.dispersion
+    r_equivalent: estimateTrendedDisp
+    description: >-
+      Estimate abundance-dependent dispersion trend using exact conditional
+      likelihood.
+    params:
+      - name: "y"
+        type: DGEList
+        required: true
+      - name: group
+        type: ndarray
+      - name: lib_size
+        type: ndarray
+      - name: ave_log_cpm_vals
+        type: ndarray
+      - name: method
+        type: str
+        default: bin.spline
+      - name: df
+        type: int
+        default: 5
+      - name: span
+        type: float
+        default: 0.667
+    returns:
+      type: DGEList
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_utilities.py
+
+  - name: estimate_glm_common_disp
+    kind: function
+    domain: dispersion
+    module: edgepython.dispersion
+    r_equivalent: estimateGLMCommonDisp
+    description: >-
+      Estimate common dispersion using Cox-Reid profile-adjusted likelihood.
+    params:
+      - name: "y"
+        type: DGEList
+        required: true
+      - name: design
+        type: ndarray
+      - name: offset
+        type: ndarray
+      - name: method
+        type: str
+        default: CoxReid
+        vocabulary: glm_disp_method
+      - name: subset
+        type: int
+        default: 10000
+      - name: ave_log_cpm_vals
+        type: ndarray
+      - name: verbose
+        type: bool
+        default: false
+      - name: weights
+        type: ndarray
+    returns:
+      type: DGEList
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_dispersion.py
+    citations:
+      - mccarthy2012
+
+  - name: estimate_glm_trended_disp
+    kind: function
+    domain: dispersion
+    module: edgepython.dispersion
+    r_equivalent: estimateGLMTrendedDisp
+    description: >-
+      Estimate trended dispersion using GLM deviances and abundance-dependent
+      smoothing.
+    params:
+      - name: "y"
+        type: DGEList
+        required: true
+      - name: design
+        type: ndarray
+      - name: offset
+        type: ndarray
+      - name: ave_log_cpm_vals
+        type: ndarray
+      - name: method
+        type: str
+        default: auto
+      - name: weights
+        type: ndarray
+    returns:
+      type: DGEList
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_dispersion.py
+    citations:
+      - mccarthy2012
+
+  - name: estimate_glm_tagwise_disp
+    kind: function
+    domain: dispersion
+    module: edgepython.dispersion
+    r_equivalent: estimateGLMTagwiseDisp
+    description: >-
+      Estimate tagwise dispersion using GLM deviances with empirical Bayes
+      shrinkage toward a trended prior.
+    params:
+      - name: "y"
+        type: DGEList
+        required: true
+      - name: design
+        type: ndarray
+      - name: offset
+        type: ndarray
+    returns:
+      type: DGEList
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_dispersion.py
+    citations:
+      - mccarthy2012
+
+  # -----------------------------------------------------------------
+  # GLM fitting
+  # -----------------------------------------------------------------
+
+  - name: glm_fit
+    kind: function
+    domain: glm_fitting
+    module: edgepython.glm_fit
+    r_equivalent: glmFit
+    description: >-
+      Fit a negative binomial generalized linear model for each gene.
+      Uses Fisher scoring with Levenberg damping.
+    params:
+      - name: "y"
+        type: [DGEList, ndarray]
+        required: true
+      - name: design
+        type: ndarray
+      - name: dispersion
+        type: [float, ndarray]
+      - name: offset
+        type: ndarray
+      - name: lib_size
+        type: ndarray
+      - name: weights
+        type: ndarray
+      - name: prior_count
+        type: float
+        default: 0.125
+      - name: start
+        type: ndarray
+    returns:
+      type: dict
+      description: DGEGLM-like dict with coefficients, fitted.values, deviance, etc.
+    impl_status: complete
+    test_status: tested_both
+    test_files:
+      - test_glm.py
+      - test_r_vs_py.py
+    citations:
+      - mccarthy2012
+
+  - name: glm_ql_fit
+    kind: function
+    domain: glm_fitting
+    module: edgepython.glm_fit
+    r_equivalent: glmQLFit
+    description: >-
+      Fit quasi-likelihood negative binomial GLMs with empirical Bayes
+      shrinkage of the quasi-likelihood dispersions.
+    params:
+      - name: "y"
+        type: [DGEList, ndarray]
+        required: true
+      - name: design
+        type: ndarray
+      - name: dispersion
+        type: [float, ndarray]
+      - name: offset
+        type: ndarray
+      - name: lib_size
+        type: ndarray
+      - name: weights
+        type: ndarray
+      - name: abundance_trend
+        type: bool
+        default: true
+      - name: ave_log_cpm
+        type: ndarray
+      - name: covariate_trend
+        type: ndarray
+      - name: robust
+        type: bool
+        default: false
+      - name: winsor_tail_p
+        type: tuple
+        default: [0.05, 0.1]
+      - name: legacy
+        type: bool
+        default: false
+      - name: top_proportion
+        type: float
+      - name: keep_unit_mat
+        type: bool
+        default: false
+    returns:
+      type: dict
+      description: DGEGLM-like dict with df.prior, var.prior, var.post, etc.
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_glm.py
+      - test_dispersion.py
+    citations:
+      - lun2016
+
+  - name: mglm_one_group
+    kind: function
+    domain: glm_fitting
+    module: edgepython.glm_fit
+    r_equivalent: mglmOneGroup
+    description: >-
+      Fit a single-group negative binomial GLM (intercept-only model)
+      for multiple genes in parallel.
+    params:
+      - name: "y"
+        type: ndarray
+        required: true
+      - name: dispersion
+        type: float
+        default: 0
+      - name: offset
+        type: [float, ndarray]
+        default: 0
+      - name: weights
+        type: ndarray
+      - name: coef_start
+        type: ndarray
+      - name: maxit
+        type: int
+        default: 50
+      - name: tol
+        type: float
+        default: 1e-10
+    returns:
+      type: ndarray
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_glm.py
+
+  - name: mglm_one_way
+    kind: function
+    domain: glm_fitting
+    module: edgepython.glm_fit
+    r_equivalent: mglmOneWay
+    description: >-
+      Fit multiple NB GLMs with a one-way layout (one coefficient per group).
+    params:
+      - name: "y"
+        type: ndarray
+        required: true
+      - name: design
+        type: ndarray
+      - name: group
+        type: ndarray
+      - name: dispersion
+        type: float
+        default: 0
+      - name: offset
+        type: [float, ndarray]
+        default: 0
+      - name: weights
+        type: ndarray
+      - name: coef_start
+        type: ndarray
+      - name: maxit
+        type: int
+        default: 50
+      - name: tol
+        type: float
+        default: 1e-10
+    returns:
+      type: dict
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_glm.py
+
+  # -----------------------------------------------------------------
+  # GLM testing
+  # -----------------------------------------------------------------
+
+  - name: glm_lrt
+    kind: function
+    domain: glm_testing
+    module: edgepython.glm_test
+    r_equivalent: glmLRT
+    description: >-
+      Conduct genewise likelihood ratio tests for one or more coefficients
+      in the GLM.
+    params:
+      - name: glmfit
+        type: dict
+        description: Fitted DGEGLM from glm_fit.
+        required: true
+      - name: coef
+        type: [int, list]
+        description: Coefficient index (or indices) to test.
+      - name: contrast
+        type: ndarray
+        description: Contrast vector or matrix for the test.
+    returns:
+      type: dict
+      description: DGELRT-like dict with table (logFC, logCPM, LR, PValue).
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_glm.py
+    citations:
+      - mccarthy2012
+
+  - name: glm_ql_ftest
+    kind: function
+    domain: glm_testing
+    module: edgepython.glm_test
+    r_equivalent: glmQLFTest
+    description: >-
+      Conduct genewise quasi-likelihood F-tests for one or more GLM
+      coefficients.
+    params:
+      - name: glmfit
+        type: dict
+        description: Fitted DGEGLM from glm_ql_fit.
+        required: true
+      - name: coef
+        type: [int, list]
+      - name: contrast
+        type: ndarray
+      - name: poisson_bound
+        type: bool
+        default: true
+    returns:
+      type: dict
+      description: DGELRT-like dict with table (logFC, logCPM, F, PValue).
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_glm.py
+    citations:
+      - lun2016
+
+  - name: glm_treat
+    kind: function
+    domain: glm_testing
+    module: edgepython.glm_test
+    r_equivalent: glmTreat
+    description: >-
+      Test whether log-fold-changes exceed a minimum threshold using
+      likelihood ratio or quasi-likelihood methods.
+    params:
+      - name: glmfit
+        type: dict
+        required: true
+      - name: coef
+        type: [int, list]
+      - name: contrast
+        type: ndarray
+      - name: lfc
+        type: float
+        description: Log2-fold-change threshold.
+        default: 0.263  # log2(1.2)
+      - name: "null"
+        type: str
+        default: interval
+        vocabulary: treat_null
+    returns:
+      type: dict
+    impl_status: complete
+    test_status: tested_both
+    test_files:
+      - test_treat.py
+      - test_r_vs_py.py
+    citations:
+      - mccarthy2012
+
+  # -----------------------------------------------------------------
+  # Exact test
+  # -----------------------------------------------------------------
+
+  - name: exact_test
+    kind: function
+    domain: exact_test
+    module: edgepython.exact_test
+    r_equivalent: exactTest
+    description: >-
+      Exact test for differential expression between two groups of
+      negative-binomial counts.
+    params:
+      - name: "y"
+        type: DGEList
+        required: true
+      - name: pair
+        type: list
+        description: Two-element list specifying groups to compare.
+      - name: dispersion
+        type: [str, float, ndarray]
+        default: auto
+      - name: rejection_region
+        type: str
+        default: doubletail
+        vocabulary: rejection_region
+      - name: big_count
+        type: int
+        default: 900
+      - name: prior_count
+        type: float
+        default: 0.125
+    returns:
+      type: dict
+      description: DGEExact-like dict with table (logFC, logCPM, PValue).
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_exact_test.py
+    citations:
+      - robinson2008
+
+  - name: exact_test_double_tail
+    kind: function
+    domain: exact_test
+    module: edgepython.exact_test
+    r_equivalent: exactTestDoubleTail
+    description: >-
+      Compute double-tail exact test p-values for negative binomial counts.
+    params:
+      - name: y1
+        type: ndarray
+        required: true
+      - name: y2
+        type: ndarray
+        required: true
+      - name: dispersion
+        type: float
+        default: 0
+      - name: big_count
+        type: int
+        default: 900
+    returns:
+      type: ndarray
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_exact_test.py
+    citations:
+      - robinson2008
+
+  - name: equalize_lib_sizes
+    kind: function
+    domain: exact_test
+    module: edgepython.exact_test
+    r_equivalent: equalizeLibSizes
+    description: >-
+      Adjust counts so that library sizes are equal using quantile-to-quantile
+      mapping of the negative binomial distribution.
+    params:
+      - name: "y"
+        type: DGEList
+        required: true
+      - name: group
+        type: ndarray
+      - name: dispersion
+        type: [float, ndarray]
+      - name: lib_size
+        type: ndarray
+    returns:
+      type: dict
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_exact_test.py
+      - test_utilities.py
+
+  - name: q2q_nbinom
+    kind: function
+    domain: exact_test
+    module: edgepython.exact_test
+    r_equivalent: q2qnbinom
+    description: >-
+      Quantile-to-quantile mapping between two negative binomial distributions
+      with different means.
+    params:
+      - name: x
+        type: ndarray
+        required: true
+      - name: input_mean
+        type: float
+        required: true
+      - name: output_mean
+        type: float
+        required: true
+      - name: dispersion
+        type: float
+        default: 0
+    returns:
+      type: ndarray
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_utilities.py
+
+  - name: split_into_groups
+    kind: function
+    domain: exact_test
+    module: edgepython.exact_test
+    r_equivalent: splitIntoGroups
+    description: >-
+      Split a count matrix into a list of sub-matrices by group.
+    params:
+      - name: "y"
+        type: [DGEList, ndarray]
+        required: true
+      - name: group
+        type: ndarray
+    returns:
+      type: list
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_utilities.py
+
+  # -----------------------------------------------------------------
+  # Results
+  # -----------------------------------------------------------------
+
+  - name: top_tags
+    kind: function
+    domain: results
+    module: edgepython.results
+    r_equivalent: topTags
+    description: >-
+      Extract a table of the top differentially expressed genes, sorted
+      by p-value or other statistics, with adjusted p-values. Supports
+      bulk results (DGEExact, DGELRT) and single-cell results from
+      glm_sc_fit (Wald test built automatically when coef is specified).
+    params:
+      - name: obj
+        type: dict
+        description: >-
+          DGELRT, DGEExact, glm_sc_fit result, or similar result dict.
+        required: true
+      - name: n
+        type: int
+        default: 10
+      - name: adjust_method
+        type: str
+        default: BH
+        vocabulary: adjust_method
+      - name: sort_by
+        type: str
+        default: PValue
+        vocabulary: sort_by
+      - name: p_value
+        type: float
+        default: 1.0
+      - name: coef
+        type: [int, str]
+        description: >-
+          Coefficient to test. Required for glm_sc_fit results (default:
+          last coefficient). Can be an integer index or predictor name
+          string. Ignored for objects that already have a table.
+    returns:
+      type: dict
+      description: TopTags-like dict with table DataFrame.
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_glm.py
+      - test_treat.py
+      - test_exact_test.py
+
+  - name: decide_tests
+    kind: function
+    domain: results
+    module: edgepython.results
+    r_equivalent: decideTests
+    description: >-
+      Classify genes as significantly up-regulated (+1), down-regulated (-1),
+      or not significant (0).
+    params:
+      - name: obj
+        type: dict
+        required: true
+      - name: adjust_method
+        type: str
+        default: BH
+        vocabulary: adjust_method
+      - name: p_value
+        type: float
+        default: 0.05
+      - name: lfc
+        type: float
+        default: 0
+    returns:
+      type: ndarray
+      description: Integer array with values in {-1, 0, 1}.
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_treat.py
+      - test_utilities.py
+
+  # -----------------------------------------------------------------
+  # I/O
+  # -----------------------------------------------------------------
+
+  - name: read_data
+    kind: function
+    domain: io
+    module: edgepython.io
+    r_equivalent: null
+    description: >-
+      Universal reader that auto-detects input type (ndarray, DataFrame,
+      CSV path, kallisto directory, AnnData, or DGEList passthrough) and
+      returns a DGEList.
+    params:
+      - name: x
+        type: [str, ndarray, DataFrame, DGEList, AnnData]
+        required: true
+    returns:
+      type: DGEList
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_io.py
+
+  - name: to_anndata
+    kind: function
+    domain: io
+    module: edgepython.io
+    r_equivalent: null
+    description: >-
+      Convert edgePython results (DGEList, DGELRT, DGEExact, TopTags,
+      DGEGLM) to AnnData format for Scanpy interoperability.
+    params:
+      - name: obj
+        type: dict
+        required: true
+      - name: adata
+        type: AnnData
+        description: Existing AnnData to update. If None, creates new.
+    returns:
+      type: AnnData
+    impl_status: complete
+    test_status: untested
+    dependencies:
+      - anndata
+
+  - name: read_dge
+    kind: function
+    domain: io
+    module: edgepython.io
+    r_equivalent: readDGE
+    description: >-
+      Read and collate individual count files into a single DGEList.
+    params:
+      - name: files
+        type: list
+        required: true
+      - name: path
+        type: str
+      - name: columns
+        type: tuple
+        default: [0, 1]
+      - name: group
+        type: ndarray
+      - name: labels
+        type: list
+      - name: sep
+        type: str
+        default: "\t"
+    returns:
+      type: DGEList
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_io.py
+
+  - name: read_10x
+    kind: function
+    domain: io
+    module: edgepython.io
+    r_equivalent: read10X
+    description: >-
+      Read 10X Genomics CellRanger output (matrix.mtx, genes/features,
+      barcodes) into a DGEList.
+    params:
+      - name: path
+        type: str
+        default: "."
+      - name: mtx
+        type: str
+      - name: genes
+        type: str
+      - name: barcodes
+        type: str
+      - name: as_dgelist
+        type: bool
+        default: true
+    returns:
+      type: [DGEList, dict]
+    impl_status: complete
+    test_status: untested
+
+  - name: catch_salmon
+    kind: function
+    domain: io
+    module: edgepython.io
+    r_equivalent: catchSalmon
+    description: >-
+      Read Salmon quantification output directories into a DGEList with
+      overdispersion estimates from inferential replicates.
+    params:
+      - name: paths
+        type: list
+        required: true
+      - name: verbose
+        type: bool
+        default: true
+    returns:
+      type: DGEList
+    impl_status: complete
+    test_status: untested
+    citations:
+      - baldoni2024a
+      - baldoni2024b
+
+  - name: catch_kallisto
+    kind: function
+    domain: io
+    module: edgepython.io
+    r_equivalent: catchKallisto
+    description: >-
+      Read kallisto quantification output (HDF5 or plaintext) into a
+      DGEList with overdispersion estimates from bootstraps.
+    params:
+      - name: paths
+        type: list
+        required: true
+      - name: verbose
+        type: bool
+        default: true
+    returns:
+      type: DGEList
+    impl_status: complete
+    test_status: untested
+    citations:
+      - baldoni2024a
+
+  - name: catch_rsem
+    kind: function
+    domain: io
+    module: edgepython.io
+    r_equivalent: catchRSEM
+    description: >-
+      Read RSEM quantification output files into a DGEList.
+    params:
+      - name: files
+        type: list
+        required: true
+      - name: verbose
+        type: bool
+        default: true
+    returns:
+      type: DGEList
+    impl_status: complete
+    test_status: untested
+
+  - name: feature_counts_to_dgelist
+    kind: function
+    domain: io
+    module: edgepython.io
+    r_equivalent: featureCounts2DGEList
+    description: >-
+      Convert Subread featureCounts output files into a DGEList.
+    params:
+      - name: files
+        type: list
+        required: true
+    returns:
+      type: DGEList
+    impl_status: complete
+    test_status: untested
+
+  - name: read_bismark2dge
+    kind: function
+    domain: io
+    module: edgepython.io
+    r_equivalent: readBismark2DGE
+    description: >-
+      Read Bismark methylation coverage files into a DGEList with
+      methylated and unmethylated count columns.
+    params:
+      - name: files
+        type: list
+        required: true
+      - name: sample_names
+        type: list
+      - name: verbose
+        type: bool
+        default: true
+    returns:
+      type: DGEList
+    impl_status: complete
+    test_status: tested_both
+    test_files:
+      - test_bismark.py
+    citations:
+      - chen2017
+
+  - name: seurat_to_pb
+    kind: function
+    domain: io
+    module: edgepython.io
+    r_equivalent: null
+    description: >-
+      Convert a Seurat/AnnData single-cell object to pseudobulk DGEList
+      by summing counts within cell-type and sample groups.
+    params:
+      - name: adata
+        type: AnnData
+        required: true
+      - name: cell_type_col
+        type: str
+        required: true
+      - name: sample_col
+        type: str
+        required: true
+      - name: layer
+        type: str
+    returns:
+      type: dict
+      description: Dict mapping cell types to DGEList objects.
+    impl_status: complete
+    test_status: untested
+
+  # -----------------------------------------------------------------
+  # Visualization
+  # -----------------------------------------------------------------
+
+  - name: plot_md
+    kind: function
+    domain: visualization
+    module: edgepython.visualization
+    r_equivalent: plotMD
+    description: >-
+      Mean-difference plot (MA plot) of log-fold-change vs average
+      log-CPM.
+    params:
+      - name: obj
+        type: [DGEList, dict, ndarray]
+        required: true
+      - name: column
+        type: int
+      - name: coef
+        type: int
+      - name: xlab
+        type: str
+      - name: ylab
+        type: str
+      - name: main
+        type: str
+      - name: status
+        type: ndarray
+      - name: values
+        type: list
+      - name: col
+        type: list
+      - name: hl_col
+        type: list
+    returns:
+      type: tuple
+      description: (matplotlib.Figure, matplotlib.Axes)
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_visualization.py
+
+  - name: plot_bcv
+    kind: function
+    domain: visualization
+    module: edgepython.visualization
+    r_equivalent: plotBCV
+    description: >-
+      Plot biological coefficient of variation (BCV) against gene abundance.
+    params:
+      - name: "y"
+        type: DGEList
+        required: true
+      - name: xlab
+        type: str
+      - name: ylab
+        type: str
+      - name: pch
+        type: int
+      - name: cex
+        type: float
+      - name: col_common
+        type: str
+        default: red
+      - name: col_trend
+        type: str
+        default: blue
+      - name: col_tagwise
+        type: str
+        default: black
+    returns:
+      type: tuple
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_visualization.py
+
+  - name: plot_mds
+    kind: function
+    domain: visualization
+    module: edgepython.visualization
+    r_equivalent: plotMDS
+    description: >-
+      Multi-dimensional scaling plot of distances between samples.
+    params:
+      - name: "y"
+        type: [DGEList, ndarray]
+        required: true
+      - name: top
+        type: int
+        default: 500
+      - name: labels
+        type: list
+      - name: pch
+        type: int
+      - name: cex
+        type: float
+        default: 1
+      - name: dim_plot
+        type: tuple
+        default: [1, 2]
+      - name: gene_selection
+        type: str
+        default: pairwise
+      - name: xlab
+        type: str
+      - name: ylab
+        type: str
+      - name: main
+        type: str
+    returns:
+      type: tuple
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_visualization.py
+
+  - name: plot_smear
+    kind: function
+    domain: visualization
+    module: edgepython.visualization
+    r_equivalent: plotSmear
+    description: >-
+      Smear plot of log-fold-changes for a two-group comparison.
+    params:
+      - name: obj
+        type: dict
+        required: true
+      - name: pair
+        type: list
+      - name: de_tags
+        type: list
+      - name: xlab
+        type: str
+      - name: ylab
+        type: str
+      - name: main
+        type: str
+      - name: smooth_scatter
+        type: bool
+        default: false
+      - name: lowess
+        type: bool
+        default: false
+    returns:
+      type: tuple
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_visualization.py
+
+  - name: plot_ql_disp
+    kind: function
+    domain: visualization
+    module: edgepython.visualization
+    r_equivalent: plotQLDisp
+    description: >-
+      Plot quasi-likelihood dispersions (raw, squeezed, and trend).
+    params:
+      - name: glmfit
+        type: dict
+        required: true
+      - name: xlab
+        type: str
+      - name: ylab
+        type: str
+      - name: pch
+        type: int
+      - name: cex
+        type: float
+      - name: col_shrunk
+        type: str
+        default: red
+      - name: col_trend
+        type: str
+        default: blue
+      - name: col_raw
+        type: str
+        default: black
+    returns:
+      type: tuple
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_visualization.py
+
+  - name: ma_plot
+    kind: function
+    domain: visualization
+    module: edgepython.visualization
+    r_equivalent: null
+    description: >-
+      Simple MA plot from pre-computed A (average) and M (log-ratio) values.
+    params:
+      - name: x
+        type: ndarray
+        required: true
+      - name: "y"
+        type: ndarray
+        required: true
+      - name: logFC
+        type: ndarray
+      - name: de_tags
+        type: list
+      - name: smooth_scatter
+        type: bool
+        default: false
+      - name: xlab
+        type: str
+        default: A
+      - name: ylab
+        type: str
+        default: M
+      - name: main
+        type: str
+    returns:
+      type: tuple
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_visualization.py
+
+  - name: gof
+    kind: function
+    domain: visualization
+    module: edgepython.visualization
+    r_equivalent: gof
+    description: >-
+      Goodness of fit test for each gene in a negative binomial GLM.
+      Computes chi-square statistics and optionally plots a QQ plot.
+    params:
+      - name: glmfit
+        type: dict
+        required: true
+      - name: pcutoff
+        type: float
+        default: 0.1
+      - name: adjust
+        type: str
+        default: holm
+        vocabulary: adjust_method
+      - name: plot
+        type: bool
+        default: true
+      - name: main
+        type: str
+    returns:
+      type: dict
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_utilities.py
+      - test_visualization.py
+
+  # -----------------------------------------------------------------
+  # Splicing
+  # -----------------------------------------------------------------
+
+  - name: diff_splice
+    kind: function
+    domain: splicing
+    module: edgepython.splicing
+    r_equivalent: diffSpliceDGE
+    description: >-
+      Test for differential exon usage between conditions within each gene.
+    params:
+      - name: glmfit
+        type: dict
+        required: true
+      - name: coef
+        type: int
+      - name: contrast
+        type: ndarray
+      - name: geneid
+        type: ndarray
+      - name: exonid
+        type: ndarray
+      - name: prior_count
+        type: float
+        default: 0.125
+      - name: robust
+        type: bool
+      - name: verbose
+        type: bool
+        default: true
+    returns:
+      type: dict
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_splicing.py
+
+  - name: diff_splice_dge
+    kind: function
+    domain: splicing
+    module: edgepython.splicing
+    r_equivalent: diffSpliceDGE
+    description: >-
+      Convenience wrapper for differential splicing from a DGEList with
+      gene and exon annotation.
+    params:
+      - name: "y"
+        type: DGEList
+        required: true
+    returns:
+      type: dict
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_splicing.py
+
+  - name: splice_variants
+    kind: function
+    domain: splicing
+    module: edgepython.splicing
+    r_equivalent: spliceVariants
+    description: >-
+      Identify genes with splice variants using a chi-square-like test
+      on proportions.
+    params:
+      - name: "y"
+        type: [DGEList, ndarray]
+        required: true
+    returns:
+      type: DataFrame
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_splicing.py
+
+  # -----------------------------------------------------------------
+  # Gene set testing
+  # -----------------------------------------------------------------
+
+  - name: camera
+    kind: function
+    domain: gene_sets
+    module: edgepython.gene_sets
+    r_equivalent: camera
+    description: >-
+      Competitive gene set test accounting for inter-gene correlation.
+      Uses the correlation-adjusted mean rank statistic.
+    params:
+      - name: "y"
+        type: [DGEList, ndarray]
+        required: true
+      - name: index
+        type: dict
+        description: Dict mapping set names to lists of gene indices.
+        required: true
+      - name: design
+        type: ndarray
+      - name: contrast
+        type: [int, ndarray]
+      - name: weights
+        type: ndarray
+      - name: use_ranks
+        type: bool
+        default: false
+      - name: allow_neg_cor
+        type: bool
+        default: false
+      - name: inter_gene_cor
+        type: float
+      - name: sort
+        type: bool
+        default: true
+    returns:
+      type: DataFrame
+    impl_status: complete
+    test_status: tested_both
+    test_files:
+      - test_gene_sets.py
+      - test_r_vs_py.py
+    citations:
+      - chen2016
+
+  - name: fry
+    kind: function
+    domain: gene_sets
+    module: edgepython.gene_sets
+    r_equivalent: fry
+    description: >-
+      Fast approximation to rotation gene set testing using analytical
+      p-values rather than random rotations.
+    params:
+      - name: "y"
+        type: [DGEList, ndarray]
+        required: true
+      - name: index
+        type: dict
+        required: true
+      - name: design
+        type: ndarray
+      - name: contrast
+        type: [int, ndarray]
+      - name: weights
+        type: ndarray
+      - name: sort
+        type: str
+        default: directional
+      - name: standardize
+        type: str
+    returns:
+      type: DataFrame
+    impl_status: complete
+    test_status: tested_both
+    test_files:
+      - test_gene_sets.py
+      - test_r_vs_py.py
+    citations:
+      - chen2016
+
+  - name: roast
+    kind: function
+    domain: gene_sets
+    module: edgepython.gene_sets
+    r_equivalent: roast
+    description: >-
+      Rotation gene set test for a single gene set using random rotations.
+    params:
+      - name: "y"
+        type: [DGEList, ndarray]
+        required: true
+      - name: index
+        type: [list, dict]
+        required: true
+      - name: design
+        type: ndarray
+      - name: contrast
+        type: [int, ndarray]
+      - name: nrot
+        type: int
+        default: 999
+      - name: weights
+        type: ndarray
+    returns:
+      type: DataFrame
+    impl_status: complete
+    test_status: tested_both
+    test_files:
+      - test_gene_sets.py
+      - test_r_vs_py.py
+    citations:
+      - chen2016
+
+  - name: mroast
+    kind: function
+    domain: gene_sets
+    module: edgepython.gene_sets
+    r_equivalent: mroast
+    description: >-
+      Rotation gene set test for multiple gene sets simultaneously.
+    params:
+      - name: "y"
+        type: [DGEList, ndarray]
+        required: true
+      - name: index
+        type: dict
+        required: true
+      - name: design
+        type: ndarray
+      - name: contrast
+        type: [int, ndarray]
+      - name: nrot
+        type: int
+        default: 999
+      - name: weights
+        type: ndarray
+    returns:
+      type: DataFrame
+    impl_status: complete
+    test_status: tested_both
+    test_files:
+      - test_gene_sets.py
+      - test_r_vs_py.py
+    citations:
+      - chen2016
+
+  - name: romer
+    kind: function
+    domain: gene_sets
+    module: edgepython.gene_sets
+    r_equivalent: romer
+    description: >-
+      Rotation testing for enrichment of gene sets using mean-rank statistics.
+    params:
+      - name: "y"
+        type: [DGEList, ndarray]
+        required: true
+      - name: index
+        type: dict
+        required: true
+      - name: design
+        type: ndarray
+      - name: contrast
+        type: [int, ndarray]
+      - name: nrot
+        type: int
+        default: 999
+    returns:
+      type: DataFrame
+    impl_status: complete
+    test_status: tested_both
+    test_files:
+      - test_gene_sets.py
+      - test_r_vs_py.py
+    citations:
+      - chen2016
+
+  - name: goana
+    kind: function
+    domain: gene_sets
+    module: edgepython.gene_sets
+    r_equivalent: goana
+    description: >-
+      Gene Ontology enrichment analysis. Delegates to gprofiler-official
+      when available; returns empty DataFrame otherwise.
+    params:
+      - name: de
+        type: [dict, list]
+        description: DE results object or gene list.
+    returns:
+      type: DataFrame
+    impl_status: delegate
+    test_status: tested
+    test_files:
+      - test_gene_sets.py
+    dependencies:
+      - gprofiler-official
+    citations:
+      - chen2016
+
+  - name: kegga
+    kind: function
+    domain: gene_sets
+    module: edgepython.gene_sets
+    r_equivalent: kegga
+    description: >-
+      KEGG pathway enrichment analysis. Delegates to gprofiler-official
+      when available; returns empty DataFrame otherwise.
+    params:
+      - name: de
+        type: [dict, list]
+        description: DE results object or gene list.
+    returns:
+      type: DataFrame
+    impl_status: delegate
+    test_status: tested
+    test_files:
+      - test_gene_sets.py
+    dependencies:
+      - gprofiler-official
+    citations:
+      - chen2016
+
+  # -----------------------------------------------------------------
+  # Utilities
+  # -----------------------------------------------------------------
+
+  - name: model_matrix
+    kind: function
+    domain: utilities
+    module: edgepython.utils
+    r_equivalent: model.matrix
+    description: >-
+      Create a design matrix from an R-style formula string using patsy.
+    params:
+      - name: formula
+        type: str
+        required: true
+      - name: data
+        type: DataFrame
+    returns:
+      type: ndarray
+    impl_status: complete
+    test_status: untested
+    dependencies:
+      - patsy
+
+  - name: model_matrix_meth
+    kind: function
+    domain: utilities
+    module: edgepython.utils
+    r_equivalent: modelMatrixMeth
+    description: >-
+      Create an expanded design matrix for BS-seq differential methylation
+      analysis with sample indicators and treatment effects.
+    params:
+      - name: object
+        type: DGEList
+        required: true
+      - name: design
+        type: ndarray
+    returns:
+      type: ndarray
+    impl_status: complete
+    test_status: tested_both
+    test_files:
+      - test_bismark.py
+    citations:
+      - chen2017
+
+  - name: nearest_tss
+    kind: function
+    domain: utilities
+    module: edgepython.utils
+    r_equivalent: nearestTSS
+    description: >-
+      Find the nearest transcription start site for genomic coordinates.
+    params:
+      - name: chr
+        type: ndarray
+        required: true
+      - name: locus
+        type: ndarray
+        required: true
+      - name: tss_data
+        type: DataFrame
+      - name: species
+        type: str
+        default: Hs
+    returns:
+      type: DataFrame
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_bismark.py
+    dependencies:
+      - pybiomart
+    citations:
+      - chen2017
+
+  - name: add_prior_count
+    kind: function
+    domain: utilities
+    module: edgepython.utils
+    r_equivalent: addPriorCount
+    description: >-
+      Add library-size-scaled prior counts to avoid log-of-zero.
+    params:
+      - name: "y"
+        type: ndarray
+        required: true
+      - name: lib_size
+        type: ndarray
+      - name: offset
+        type: ndarray
+      - name: prior_count
+        type: float
+        default: 1
+    returns:
+      type: tuple
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_utilities.py
+
+  - name: pred_fc
+    kind: function
+    domain: utilities
+    module: edgepython.utils
+    r_equivalent: predFC
+    description: >-
+      Predicted (shrunken) log-fold-changes from a design matrix.
+    params:
+      - name: "y"
+        type: [DGEList, ndarray]
+        required: true
+      - name: design
+        type: ndarray
+        required: true
+      - name: prior_count
+        type: float
+        default: 0.125
+      - name: offset
+        type: ndarray
+      - name: dispersion
+        type: float
+        default: 0
+      - name: weights
+        type: ndarray
+    returns:
+      type: ndarray
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_expression.py
+      - test_utilities.py
+
+  - name: good_turing
+    kind: function
+    domain: utilities
+    module: edgepython.utils
+    r_equivalent: goodTuring
+    description: >-
+      Simple Good-Turing frequency estimation for adjusting observed
+      frequency counts.
+    params:
+      - name: x
+        type: ndarray
+        required: true
+      - name: conf
+        type: float
+        default: 1.96
+    returns:
+      type: dict
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_utilities.py
+
+  - name: thin_counts
+    kind: function
+    domain: utilities
+    module: edgepython.utils
+    r_equivalent: thinCounts
+    description: >-
+      Binomial or multinomial thinning of counts to reduce library size.
+    params:
+      - name: x
+        type: ndarray
+        required: true
+      - name: prob
+        type: [float, ndarray]
+      - name: target_size
+        type: int
+    returns:
+      type: ndarray
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_utilities.py
+
+  - name: gini
+    kind: function
+    domain: utilities
+    module: edgepython.utils
+    r_equivalent: gini
+    description: >-
+      Gini diversity index for columns of a count matrix.
+    params:
+      - name: x
+        type: ndarray
+        required: true
+    returns:
+      type: ndarray
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_utilities.py
+
+  - name: sum_tech_reps
+    kind: function
+    domain: utilities
+    module: edgepython.utils
+    r_equivalent: sumTechReps
+    description: >-
+      Sum counts over technical replicate columns sharing the same ID.
+    params:
+      - name: x
+        type: [DGEList, ndarray]
+        required: true
+      - name: ID
+        type: ndarray
+    returns:
+      type: [DGEList, ndarray]
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_utilities.py
+
+  - name: zscore_nbinom
+    kind: function
+    domain: utilities
+    module: edgepython.utils
+    r_equivalent: zscoreNBinom
+    description: >-
+      Compute z-score equivalents for negative binomial deviates using
+      mid-p or exact CDF.
+    params:
+      - name: q
+        type: ndarray
+        required: true
+      - name: size
+        type: [float, ndarray]
+        required: true
+      - name: mu
+        type: [float, ndarray]
+        required: true
+      - name: method
+        type: str
+        default: midp
+    returns:
+      type: ndarray
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_utilities.py
+
+  # -----------------------------------------------------------------
+  # Limma port
+  # -----------------------------------------------------------------
+
+  - name: squeeze_var
+    kind: function
+    domain: limma
+    module: edgepython.limma_port
+    r_equivalent: squeezeVar
+    description: >-
+      Empirical Bayes moderation of genewise variances toward a common
+      value or trend, producing posterior variances with increased
+      degrees of freedom.
+    params:
+      - name: var
+        type: ndarray
+        required: true
+      - name: df
+        type: [float, ndarray]
+        required: true
+      - name: covariate
+        type: ndarray
+      - name: span
+        type: float
+      - name: robust
+        type: bool
+        default: false
+      - name: winsor_tail_p
+        type: tuple
+        default: [0.05, 0.1]
+      - name: legacy
+        type: bool
+    returns:
+      type: dict
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_utilities.py
+    citations:
+      - lun2016
+
+  # -----------------------------------------------------------------
+  # Single-cell mixed model (NEBULA-LN)
+  # -----------------------------------------------------------------
+
+  - name: glm_sc_fit
+    kind: function
+    domain: single_cell
+    module: edgepython.sc_fit
+    r_equivalent: null
+    upstream_package: nebula
+    description: >-
+      Fit a single-cell negative binomial gamma mixed model (NEBULA-LN)
+      with subject-level random intercepts. Retains cell-level resolution
+      while accounting for replicate structure. Uses a two-stage
+      optimizer: L-BFGS-B for initial parameters, then penalized ML with
+      Schur complement for refined coefficients and random effects.
+      Includes numba-accelerated inner loops for performance.
+    params:
+      - name: "y"
+        type: [AnnData, dict, ndarray]
+        description: >-
+          Count data. AnnData (cells x genes) or raw matrix (genes x cells).
+        required: true
+      - name: cell_meta
+        type: DataFrame
+        description: >-
+          Cell-level metadata. Extracted from y.obs for AnnData input.
+      - name: design
+        type: [ndarray, DataFrame]
+        description: >-
+          Design matrix (cells x predictors) with an intercept column.
+          If None, an intercept-only model is fitted.
+      - name: sample
+        type: [str, ndarray]
+        description: >-
+          Subject/sample identifiers per cell. If a string, names a column
+          in cell_meta. Required.
+        required: true
+      - name: offset
+        type: ndarray
+        description: >-
+          Per-cell positive scaling factors. If provided, norm_method is
+          ignored.
+      - name: norm_method
+        type: str
+        description: >-
+          'TMM' (default): compute per-cell offset from per-cell library
+          sizes and pseudobulk TMM normalization factors.
+          'none': all-ones offset (original nebula behaviour).
+        default: TMM
+      - name: method
+        type: str
+        description: NEBULA-LN algorithm.
+        default: nebula
+      - name: min_bounds
+        type: tuple
+        description: Lower bounds for (sigma_param, phi).
+        default: [0.0001, 0.0001]
+      - name: max_bounds
+        type: tuple
+        description: Upper bounds for (sigma_param, phi).
+        default: [10.0, 1000.0]
+      - name: cpc
+        type: float
+        description: Minimum mean counts per cell for gene filtering.
+        default: 0.005
+      - name: mincp
+        type: int
+        description: Minimum non-zero cells for gene filtering.
+        default: 5
+      - name: cutoff_cell
+        type: float
+        description: Threshold for NEBULA-HL fallback (cells_per_subject x phi).
+        default: 20
+      - name: kappa
+        type: float
+        description: Accuracy threshold for subject-level overdispersion.
+        default: 800
+      - name: ncore
+        type: int
+        description: Number of parallel workers (1 = sequential).
+        default: 1
+      - name: verbose
+        type: bool
+        description: Print progress messages.
+        default: true
+    returns:
+      type: dict
+      description: >-
+        DGEGLM-like fit result with keys: 'coefficients' (ngenes x p),
+        'se' (ngenes x p), 'dispersion' (ngenes,), 'sigma_sample'
+        (ngenes,), 'convergence' (ngenes,), 'design', 'offset',
+        'genes', 'gene_mask', 'method' ('nebula_ln'), 'predictor_names',
+        'ncells', 'nsamples'. Pass to top_tags(fit, coef=...) for Wald
+        testing.
+    impl_status: complete
+    test_status: tested_both
+    test_files:
+      - test_sc_fit.py
+    notes: >-
+      Validated against R nebula on sample_data (10 genes, 30 subjects,
+      6176 cells): logFC max diff ~3e-4, SE ~1.7e-4. Also validated on
+      jellyfish dataset (10K+ genes, 13K cells).
+    citations:
+      - he2021
+    dependencies:
+      - numba
+      - scipy
+
+  - name: glm_sc_test
+    kind: function
+    domain: single_cell
+    module: edgepython.sc_fit
+    r_equivalent: null
+    upstream_package: nebula
+    description: >-
+      Wald test on a glm_sc_fit result. Computes z-scores and p-values
+      for a single coefficient or a custom contrast. Returns a table with
+      logFC, SE, z, PValue, FDR, sigma_sample, dispersion, and
+      convergence status. Note: top_tags() can also be used directly on
+      glm_sc_fit results with the coef parameter.
+    params:
+      - name: fit
+        type: dict
+        description: Output from glm_sc_fit().
+        required: true
+      - name: coef
+        type: int
+        description: >-
+          0-based column index of the coefficient to test. Default: last
+          column.
+      - name: contrast
+        type: ndarray
+        description: >-
+          Custom contrast vector (length p). If given, coef is ignored.
+    returns:
+      type: dict
+      description: >-
+        Dict with key 'table' containing a DataFrame with columns:
+        logFC, SE, z, PValue, FDR, sigma_sample, dispersion, converged.
+    impl_status: complete
+    test_status: tested_both
+    test_files:
+      - test_sc_fit.py
+    citations:
+      - he2021
+
+# =====================================================================
+# Relationships between functions
+# =====================================================================
+
+relationships:
+
+  # Typical pipeline ordering (function A is typically called before B)
+  pipeline_order:
+    - from: make_dgelist
+      to: calc_norm_factors
+      relation: precedes
+      description: Normalization follows DGEList construction.
+
+    - from: calc_norm_factors
+      to: filter_by_expr
+      relation: precedes
+      description: Filtering after normalization.
+
+    - from: filter_by_expr
+      to: estimate_disp
+      relation: precedes
+      description: Dispersion estimation on filtered data.
+
+    - from: estimate_disp
+      to: glm_fit
+      relation: precedes
+      description: GLM fitting requires dispersion estimates.
+
+    - from: estimate_disp
+      to: glm_ql_fit
+      relation: precedes
+      description: QL fitting requires dispersion estimates.
+
+    - from: estimate_disp
+      to: exact_test
+      relation: precedes
+      description: Exact test requires dispersion estimates.
+
+    - from: glm_fit
+      to: glm_lrt
+      relation: precedes
+      description: LRT requires a fitted GLM.
+
+    - from: glm_ql_fit
+      to: glm_ql_ftest
+      relation: precedes
+      description: QL F-test requires a QL-fitted GLM.
+
+    - from: glm_fit
+      to: glm_treat
+      relation: precedes
+      description: Treat can use either LRT or QL fit.
+
+    - from: glm_ql_fit
+      to: glm_treat
+      relation: precedes
+      description: Treat can use either LRT or QL fit.
+
+    - from: glm_lrt
+      to: top_tags
+      relation: precedes
+      description: Extract top genes from test results.
+
+    - from: glm_ql_ftest
+      to: top_tags
+      relation: precedes
+      description: Extract top genes from test results.
+
+    - from: exact_test
+      to: top_tags
+      relation: precedes
+      description: Extract top genes from test results.
+
+    - from: glm_treat
+      to: top_tags
+      relation: precedes
+      description: Extract top genes from test results.
+
+    - from: glm_lrt
+      to: decide_tests
+      relation: precedes
+
+    - from: glm_ql_ftest
+      to: decide_tests
+      relation: precedes
+
+    - from: glm_treat
+      to: decide_tests
+      relation: precedes
+
+    - from: glm_sc_fit
+      to: glm_sc_test
+      relation: precedes
+      description: Wald test requires a fitted SC model.
+
+    - from: glm_sc_fit
+      to: top_tags
+      relation: precedes
+      description: >-
+        top_tags can be called directly on glm_sc_fit results with
+        coef parameter to perform Wald testing.
+
+  # Functional alternatives (functions that serve the same purpose)
+  alternatives:
+    - functions: [glm_lrt, glm_ql_ftest]
+      description: >-
+        Both test for differential expression from a fitted GLM.
+        glm_ql_ftest is preferred for small sample sizes due to more
+        conservative type I error control.
+
+    - functions: [exact_test, glm_lrt, glm_ql_ftest]
+      description: >-
+        All test for differential expression. exact_test is for simple
+        two-group comparisons; GLM methods handle arbitrary designs.
+
+    - functions: [fry, roast]
+      description: >-
+        Both test for directional enrichment of gene sets. fry is the
+        fast analytical approximation; roast uses random rotations.
+
+    - functions: [cpm, rpkm, tpm]
+      description: >-
+        All produce normalized expression measures. cpm normalizes by
+        library size; rpkm additionally normalizes by gene length;
+        tpm rescales to sum to one million per sample.
+
+    - functions: [estimate_disp, estimate_common_disp]
+      description: >-
+        estimate_disp is the recommended all-in-one function.
+        estimate_common_disp is the legacy function for common-only.
+
+    - functions: [glm_fit, glm_ql_fit]
+      description: >-
+        Both fit negative binomial GLMs. glm_ql_fit additionally
+        estimates quasi-likelihood dispersions for the F-test.
+
+    - functions: [glm_sc_fit, seurat_to_pb]
+      description: >-
+        Both handle single-cell data. glm_sc_fit fits a cell-level
+        NB mixed model (NEBULA-LN) retaining cell-level resolution.
+        seurat_to_pb aggregates to pseudobulk for use with bulk
+        methods (glm_fit, glm_ql_fit).
+
+    - functions: [glm_sc_test, top_tags]
+      description: >-
+        Both extract test results from a glm_sc_fit object.
+        glm_sc_test returns a full table with FDR, sigma_sample,
+        dispersion, and convergence columns. top_tags provides
+        sorting, filtering, and multiple testing adjustment.
+
+  # Input-output type constraints
+  input_requires:
+    - function: exact_test
+      requires: DGEList
+      description: Requires a DGEList with at least two groups.
+
+    - function: glm_lrt
+      requires: DGEGLM
+      description: Requires a fitted GLM from glm_fit.
+
+    - function: glm_ql_ftest
+      requires: DGEGLM
+      description: Requires a QL-fitted GLM from glm_ql_fit.
+
+    - function: plot_bcv
+      requires: DGEList
+      description: Requires a DGEList with dispersion estimates.
+
+    - function: plot_ql_disp
+      requires: DGEGLM
+      description: Requires a QL-fitted GLM from glm_ql_fit.
+
+    - function: diff_splice
+      requires: DGEGLM
+      description: Requires a fitted GLM with exon-level data.
+
+    - function: glm_sc_test
+      requires: dict
+      description: Requires a fitted model from glm_sc_fit.
+
+  # Functions that share internal implementation
+  delegates_to:
+    - from: estimate_disp
+      to: [estimate_glm_common_disp, estimate_glm_trended_disp, estimate_glm_tagwise_disp, WLEB]
+      description: estimate_disp orchestrates the full pipeline.
+
+    - from: mroast
+      to: roast
+      description: mroast calls roast for each gene set.
+
+    - from: goana
+      to: gprofiler-official
+      description: Delegates enrichment to the gprofiler Python package.
+
+    - from: kegga
+      to: gprofiler-official
+      description: Delegates enrichment to the gprofiler Python package.
+
+# =====================================================================
+# Test suite summary
+# =====================================================================
+
+testing:
+  framework: pytest
+  total_tests: 346
+  test_directory: tests/
+  conftest: tests/conftest.py
+  data_directory: tests/data/
+  data_files: 115
+
+  test_files:
+    - file: test_bismark.py
+      tests: 48
+      domains: [io, utilities]
+      includes_r_comparison: true
+
+    - file: test_classes.py
+      tests: 11
+      domains: [classes]
+      includes_r_comparison: false
+
+    - file: test_dgelist.py
+      tests: 11
+      domains: [dgelist, normalization, filtering]
+      includes_r_comparison: false
+
+    - file: test_dispersion.py
+      tests: 26
+      domains: [dispersion]
+      includes_r_comparison: false
+
+    - file: test_exact_test.py
+      tests: 12
+      domains: [exact_test]
+      includes_r_comparison: false
+
+    - file: test_expression.py
+      tests: 12
+      domains: [expression]
+      includes_r_comparison: false
+
+    - file: test_gene_sets.py
+      tests: 37
+      domains: [gene_sets]
+      includes_r_comparison: false
+
+    - file: test_glm.py
+      tests: 36
+      domains: [glm_fitting, glm_testing]
+      includes_r_comparison: false
+
+    - file: test_io.py
+      tests: 7
+      domains: [io]
+      includes_r_comparison: false
+
+    - file: test_r_vs_py.py
+      tests: 73
+      domains: [normalization, dgelist, glm_testing, gene_sets]
+      includes_r_comparison: true
+
+    - file: test_splicing.py
+      tests: 3
+      domains: [splicing]
+      includes_r_comparison: false
+
+    - file: test_treat.py
+      tests: 22
+      domains: [glm_testing]
+      includes_r_comparison: false
+
+    - file: test_utilities.py
+      tests: 26
+      domains: [utilities, limma]
+      includes_r_comparison: false
+
+    - file: test_visualization.py
+      tests: 8
+      domains: [visualization]
+      includes_r_comparison: false
+
+    - file: test_sc_fit.py
+      tests: 41
+      domains: [single_cell]
+      includes_r_comparison: false
+
+  untested_functions:
+    - normalize_chip_to_input
+    - calc_norm_offsets_for_chip
+    - get_dispersion_type
+    - to_anndata
+    - read_10x
+    - catch_salmon
+    - catch_kallisto
+    - catch_rsem
+    - feature_counts_to_dgelist
+    - seurat_to_pb
+    - model_matrix

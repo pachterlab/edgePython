@@ -1,0 +1,8 @@
+query_chr,query_pos,gene_id,gene_name,strand,tss,distance
+chr1,2000,gene1,GENEA,+,1500,500
+chr1,6000,gene3,GENEC,+,5000,1000
+chr2,3000,gene6,GENEF,+,2000,1000
+chr2,10000,gene9,GENEI,+,11000,-1000
+chr3,500,gene10,GENEJ,-,1000,500
+chr3,5000,gene11,GENEK,+,4000,1000
+chr1,15000,gene5,GENEE,-,10000,-5000

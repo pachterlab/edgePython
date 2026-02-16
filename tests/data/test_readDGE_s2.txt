@@ -1,0 +1,4 @@
+Gene	Count
+geneA	15
+geneB	25
+geneC	35
