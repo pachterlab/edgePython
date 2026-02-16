@@ -113,6 +113,10 @@ The [examples/hoxa1](examples/hoxa1) directory contains two notebooks for the GS
 - [hoxa1_tutorial.ipynb](examples/hoxa1/hoxa1_tutorial.ipynb) — edgePython-only tutorial with scaled analysis using bootstrap overdispersion (Colab-ready)
 - [hoxa1_R_vs_Python.ipynb](examples/hoxa1/hoxa1_R_vs_Python.ipynb) — side-by-side edgeR vs edgePython comparison reproducing Figure 1 panels
 
+The [examples/clytia](examples/clytia) directory contains a notebook for the *Clytia hemisphaerica* single-cell RNA-seq dataset ([Chari et al. 2021](https://doi.org/10.1016/j.celrep.2021.109751)), demonstrating the NEBULA-LN mixed model with empirical Bayes dispersion shrinkage:
+
+- [clytia_tutorial.ipynb](examples/clytia/clytia_tutorial.ipynb) — single-cell differential expression of fed vs starved gastrodigestive cells across 10 organisms, reproducing Figure 2 panels (Colab-ready)
+
 ## Development
 
 Run tests:
