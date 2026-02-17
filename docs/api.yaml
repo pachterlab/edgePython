@@ -322,6 +322,30 @@ citations:
       by glmLRT robust to outlier observations.
     functions:
       - estimate_disp  # robust=True option
+      - estimate_glm_robust_disp
+
+  - id: law2014
+    authors:
+      - Law CW
+      - Chen Y
+      - Shi W
+      - Smyth GK
+    year: 2014
+    title: >-
+      voom: precision weights unlock linear model analysis tools for RNA-seq
+      read counts
+    journal: Genome Biology
+    volume: 15
+    pages: R29
+    contribution: >-
+      Introduced voom mean-variance modeling and precision weights to enable
+      limma linear-model workflows for RNA-seq count data.
+    functions:
+      - voom
+      - voom_lmfit
+      - voom_basic
+      - array_weights
+      - duplicate_correlation
 
   - id: dai2014
     authors:
@@ -1498,6 +1522,54 @@ api:
       - test_dispersion.py
     citations:
       - mccarthy2012
+
+  - name: estimate_glm_robust_disp
+    kind: function
+    domain: dispersion
+    module: edgepython.dispersion
+    r_equivalent: estimateGLMRobustDisp
+    description: >-
+      Robust GLM dispersion estimation with iterative Huber reweighting of
+      residuals, with optional re-estimation of trend and tagwise dispersions
+      at each iteration.
+    params:
+      - name: "y"
+        type: DGEList
+        required: true
+      - name: design
+        type: ndarray
+      - name: prior_df
+        type: float
+        default: 10
+      - name: update_trend
+        type: bool
+        default: true
+      - name: trend_method
+        type: str
+        default: bin.loess
+      - name: maxit
+        type: int
+        default: 6
+      - name: k
+        type: float
+        default: 1.345
+      - name: residual_type
+        type: str
+        default: pearson
+      - name: verbose
+        type: bool
+        default: false
+      - name: record
+        type: bool
+        default: false
+    returns:
+      type: DGEList
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_dispersion.py
+    citations:
+      - zhou2014
 
   # -----------------------------------------------------------------
   # GLM fitting
@@ -3065,6 +3137,236 @@ api:
       - test_utilities.py
     citations:
       - lun2016
+
+  # -----------------------------------------------------------------
+  # Voom / limma RNA-seq weighting
+  # -----------------------------------------------------------------
+
+  - name: voom
+    kind: function
+    domain: limma
+    module: edgepython.voom_lmfit
+    r_equivalent: voom
+    description: >-
+      Estimate voom precision weights from the mean-variance trend of
+      log2-counts-per-million and return a weighted expression object and
+      optional trend diagnostics.
+    params:
+      - name: counts
+        type: ndarray
+        required: true
+      - name: design
+        type: ndarray
+      - name: lib_size
+        type: ndarray
+      - name: normalize_method
+        type: str
+        default: none
+      - name: span
+        type: float
+        default: 0.5
+      - name: adaptive_span
+        type: bool
+        default: false
+      - name: block
+        type: ndarray
+      - name: correlation
+        type: float
+      - name: prior_weights
+        type: ndarray
+      - name: sample_weights
+        type: bool
+        default: false
+      - name: var_design
+        type: ndarray
+      - name: var_group
+        type: ndarray
+      - name: prior_n
+        type: float
+        default: 10.0
+      - name: structural_zeros
+        type: bool
+        default: false
+      - name: save_plot
+        type: bool
+        default: false
+      - name: keep_elist
+        type: bool
+        default: true
+    returns:
+      type: dict
+    impl_status: complete
+    test_status: tested_both
+    test_files:
+      - test_voom_lmfit.py
+      - test_voom_r_parity.py
+    citations:
+      - law2014
+
+  - name: voom_lmfit
+    kind: function
+    domain: limma
+    module: edgepython.voom_lmfit
+    r_equivalent: voomLmFit
+    description: >-
+      edgeR-compatible wrapper around voom that enables structural-zero
+      handling and iterative sample/block weighting workflow.
+    params:
+      - name: counts
+        type: ndarray
+        required: true
+      - name: design
+        type: ndarray
+      - name: block
+        type: ndarray
+      - name: prior_weights
+        type: ndarray
+      - name: sample_weights
+        type: bool
+        default: false
+      - name: var_design
+        type: ndarray
+      - name: var_group
+        type: ndarray
+      - name: prior_n
+        type: float
+        default: 10.0
+      - name: lib_size
+        type: ndarray
+      - name: normalize_method
+        type: str
+        default: none
+      - name: span
+        type: float
+        default: 0.5
+      - name: adaptive_span
+        type: bool
+        default: false
+      - name: save_plot
+        type: bool
+        default: false
+      - name: keep_elist
+        type: bool
+        default: true
+    returns:
+      type: dict
+    impl_status: complete
+    test_status: tested_both
+    test_files:
+      - test_voom_lmfit.py
+      - test_voom_r_parity.py
+    citations:
+      - law2014
+
+  - name: voom_basic
+    kind: function
+    domain: limma
+    module: edgepython.voom_lmfit
+    r_equivalent: voom
+    description: >-
+      Backward-compatible lightweight voom wrapper that preserves earlier
+      edgePython return keys while using the shared voom engine.
+    params:
+      - name: counts
+        type: ndarray
+        required: true
+      - name: design
+        type: ndarray
+      - name: lib_size
+        type: ndarray
+      - name: norm_factors
+        type: ndarray
+      - name: prior_count
+        type: float
+        default: 0.5
+      - name: span
+        type: float
+      - name: lowess_iterations
+        type: int
+        default: 4
+      - name: lowess_npts
+        type: int
+        default: 200
+    returns:
+      type: dict
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_voom_lmfit.py
+    citations:
+      - law2014
+
+  - name: array_weights
+    kind: function
+    domain: limma
+    module: edgepython.voom_lmfit
+    r_equivalent: arrayWeights
+    description: >-
+      Estimate sample-level precision weights for linear modeling using
+      genebygene or REML optimization.
+    params:
+      - name: "y"
+        type: ndarray
+        required: true
+      - name: design
+        type: ndarray
+        required: true
+      - name: weights
+        type: ndarray
+      - name: var_design
+        type: ndarray
+      - name: var_group
+        type: ndarray
+      - name: prior_n
+        type: float
+        default: 10.0
+      - name: method
+        type: str
+        default: auto
+      - name: max_iter
+        type: int
+        default: 50
+      - name: tol
+        type: float
+        default: 1e-5
+    returns:
+      type: ndarray
+    impl_status: complete
+    test_status: tested_both
+    test_files:
+      - test_voom_lmfit.py
+      - test_voom_r_parity.py
+
+  - name: duplicate_correlation
+    kind: function
+    domain: limma
+    module: edgepython.voom_lmfit
+    r_equivalent: duplicateCorrelation
+    description: >-
+      Estimate consensus within-block correlation from per-gene residual
+      correlations for repeated-measures/blocked designs.
+    params:
+      - name: "y"
+        type: ndarray
+        required: true
+      - name: design
+        type: ndarray
+        required: true
+      - name: block
+        type: ndarray
+        required: true
+      - name: weights
+        type: ndarray
+      - name: trim
+        type: float
+        default: 0.15
+    returns:
+      type: dict
+    impl_status: complete
+    test_status: tested_both
+    test_files:
+      - test_voom_lmfit.py
+      - test_voom_r_parity.py
 
   # -----------------------------------------------------------------
   # Single-cell mixed model (NEBULA-LN)

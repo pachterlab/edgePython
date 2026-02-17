@@ -35,7 +35,9 @@ mcp = FastMCP(
     instructions=(
         "RNA-seq differential expression analysis server powered by edgePython. "
         "Bulk workflow: load_data → filter_genes → normalize → set_design → "
-        "estimate_dispersion → fit_model → test_contrast → get_top_genes / generate_plot. "
+        "estimate_dispersion (or estimate_glm_robust_dispersion) → "
+        "voom_transform (optional) → fit_model → test_contrast → "
+        "get_top_genes / generate_plot. "
         "Single-cell workflow: load_sc_data → fit_sc_model → test_sc_coef → get_sc_top_genes. "
         "Use describe() or describe_sc() to see current pipeline state."
     ),
@@ -50,6 +52,7 @@ _state: dict = {
     "glm_fit": None,       # Fitted GLM (non-QL)
     "results": {},         # name → DGELRT-like dict
     "last_result": None,   # Name of most recent test result
+    "voom": None,          # Most recent voom/voomLmFit output dict
     "filtered": False,
     "normalized": False,
     "dispersions_estimated": False,
@@ -295,6 +298,7 @@ def load_data(
     _state["glm_fit"] = None
     _state["results"] = {}
     _state["last_result"] = None
+    _state["voom"] = None
 
     # Build summary
     lib_sizes = dgelist["samples"]["lib.size"].values
@@ -391,6 +395,7 @@ def load_data_auto(
     _state["glm_fit"] = None
     _state["results"] = {}
     _state["last_result"] = None
+    _state["voom"] = None
 
     counts = dgelist["counts"]
     gene_ids = None
@@ -488,6 +493,13 @@ def describe() -> str:
                 lines.append(f"Model fitted (QL): prior df = {pdf:.2f}")
             else:
                 lines.append(f"Model fitted (QL): median prior df = {np.median(pdf):.2f}")
+    if _state["voom"] is not None:
+        vw = _state["voom"].get("weights")
+        if vw is not None:
+            lines.append(
+                f"Voom weights: {vw.shape[0]:,}×{vw.shape[1]}, "
+                f"range {np.nanmin(vw):.3g}–{np.nanmax(vw):.3g}"
+            )
 
     if _state["results"]:
         lines.append(f"Test results: {', '.join(_state['results'].keys())}")
@@ -511,6 +523,7 @@ def reset_state() -> str:
     _state["glm_fit"] = None
     _state["results"] = {}
     _state["last_result"] = None
+    _state["voom"] = None
     _state["filtered"] = False
     _state["normalized"] = False
     _state["dispersions_estimated"] = False
@@ -564,6 +577,7 @@ def filter_genes(
     _state["glm_fit"] = None
     _state["results"] = {}
     _state["last_result"] = None
+    _state["voom"] = None
     _state["filtered"] = True
 
     # Recompute lib sizes after filtering
@@ -593,6 +607,7 @@ def normalize(method: str = "TMM") -> str:
     d = ep.calc_norm_factors(d, method=method)
     _state["dgelist"] = d
     _state["normalized"] = True
+    _state["voom"] = None
 
     nf = d["samples"]["norm.factors"].values
     eff = d["samples"]["lib.size"].values * nf
@@ -650,6 +665,7 @@ def normalize_chip(
         inp_mat, d, dispersion=dispersion, niter=niter, loss=loss,
     )
     _state["dgelist"] = d
+    _state["voom"] = None
 
     lines = [
         f"ChIP normalization applied (dispersion={dispersion}, loss='{loss}').",
@@ -758,6 +774,7 @@ def set_design(formula: str) -> str:
     _state["glm_fit"] = None
     _state["results"] = {}
     _state["last_result"] = None
+    _state["voom"] = None
 
     lines = [
         f"Design matrix: {design.shape[0]} samples × {design.shape[1]} coefficients",
@@ -801,6 +818,7 @@ def set_design_matrix(matrix: list, columns: list) -> str:
     _state["glm_fit"] = None
     _state["results"] = {}
     _state["last_result"] = None
+    _state["voom"] = None
 
     lines = [
         f"Design matrix set: {design.shape[0]} samples × {design.shape[1]} coefficients",
@@ -831,6 +849,7 @@ def estimate_dispersion(robust: bool = True) -> str:
     d = ep.estimate_disp(d, **kwargs)
     _state["dgelist"] = d
     _state["dispersions_estimated"] = True
+    _state["voom"] = None
 
     cd = d.get("common.dispersion", None)
     prior_df = d.get("prior.df", None)
@@ -848,6 +867,126 @@ def estimate_dispersion(robust: bool = True) -> str:
         lines.append(f"Trended dispersion range: {td.min():.4f} – {td.max():.4f}")
 
     return "\n".join(lines) if lines else "Dispersions estimated."
+
+
+# ---------------------------------------------------------------------------
+# Tool 6b: estimate_glm_robust_dispersion
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def estimate_glm_robust_dispersion(
+    prior_df: float = 10.0,
+    update_trend: bool = True,
+    maxit: int = 6,
+    k: float = 1.345,
+    residual_type: str = "pearson",
+    verbose: bool = False,
+) -> str:
+    """Estimate robust GLM dispersions with iterative Huber reweighting.
+
+    Requires a design matrix; mirrors edgeR's estimateGLMRobustDisp.
+    """
+    _require("dgelist", "DGEList")
+    _require("design", "design matrix")
+    d = _state["dgelist"]
+
+    d = ep.estimate_glm_robust_disp(
+        d,
+        design=_state["design"],
+        prior_df=float(prior_df),
+        update_trend=bool(update_trend),
+        maxit=int(maxit),
+        k=float(k),
+        residual_type=str(residual_type),
+        verbose=bool(verbose),
+        record=False,
+    )
+    _state["dgelist"] = d
+    _state["dispersions_estimated"] = True
+    _state["voom"] = None
+
+    lines = ["Robust GLM dispersions estimated (Huber reweighting)."]
+    cd = d.get("common.dispersion")
+    if cd is not None:
+        lines.append(f"Common dispersion: {float(cd):.4f} (BCV {np.sqrt(float(cd)):.4f})")
+    td = d.get("trended.dispersion")
+    if td is not None:
+        lines.append(f"Trended dispersion range: {np.min(td):.4f} – {np.max(td):.4f}")
+    tw = d.get("tagwise.dispersion")
+    if tw is not None:
+        lines.append(f"Tagwise dispersion range: {np.min(tw):.4f} – {np.max(tw):.4f}")
+    w = d.get("weights")
+    if w is not None:
+        lines.append(f"Robust weights range: {np.min(w):.3g} – {np.max(w):.3g}")
+    _append_gene_level_warning(lines)
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Tool 6c: voom_transform
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def voom_transform(
+    span: float = 0.5,
+    adaptive_span: bool = False,
+    sample_weights: bool = False,
+    block_column: Optional[str] = None,
+) -> str:
+    """Run voom/voomLmFit-style mean-variance weighting.
+
+    Uses current counts + design and stores the voom result in MCP state.
+    """
+    _require("dgelist", "DGEList")
+    _require("design", "design matrix")
+    d = _state["dgelist"]
+
+    samples = d.get("samples")
+    lib_size = None
+    if samples is not None and "lib.size" in samples:
+        lib_size = np.asarray(samples["lib.size"].values, dtype=np.float64)
+        if "norm.factors" in samples:
+            lib_size = lib_size * np.asarray(samples["norm.factors"].values, dtype=np.float64)
+
+    block = None
+    if block_column is not None:
+        if samples is None or block_column not in samples.columns:
+            raise ValueError(f"block_column '{block_column}' not found in sample metadata.")
+        block = samples[block_column].astype(str).values
+
+    v = ep.voom_lmfit(
+        counts=np.asarray(d["counts"], dtype=np.float64),
+        design=np.asarray(_state["design"], dtype=np.float64),
+        block=block,
+        sample_weights=bool(sample_weights),
+        lib_size=lib_size,
+        span=float(span),
+        adaptive_span=bool(adaptive_span),
+        normalize_method="none",
+        save_plot=False,
+        keep_elist=True,
+    )
+    _state["voom"] = v
+
+    w = v.get("weights")
+    lines = [
+        "voom transform completed.",
+        f"Input: {d['counts'].shape[0]:,} features × {d['counts'].shape[1]} samples",
+        f"Span used: {float(v.get('span', span)):.3f}",
+    ]
+    if w is not None:
+        lines.append(
+            f"Weights: shape {w.shape[0]:,}×{w.shape[1]}, "
+            f"range {np.nanmin(w):.3g}–{np.nanmax(w):.3g}"
+        )
+    corr = v.get("correlation")
+    if corr is not None and np.isfinite(corr):
+        lines.append(f"Consensus block correlation: {float(corr):.4f}")
+    sw = v.get("sample_weights")
+    if sw is not None:
+        lines.append(f"Sample-weight range: {np.nanmin(sw):.3g}–{np.nanmax(sw):.3g}")
+    _append_gene_level_warning(lines)
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -870,6 +1009,7 @@ def fit_model(robust: bool = True) -> str:
     # Clear old results
     _state["results"] = {}
     _state["last_result"] = None
+    _state["voom"] = None
 
     n_genes = fit["coefficients"].shape[0]
     n_coef = fit["coefficients"].shape[1]
@@ -907,6 +1047,7 @@ def fit_glm() -> str:
     _state["glm_fit"] = fit
     _state["results"] = {}
     _state["last_result"] = None
+    _state["voom"] = None
 
     n_genes = fit["coefficients"].shape[0]
     n_coef = fit["coefficients"].shape[1]
