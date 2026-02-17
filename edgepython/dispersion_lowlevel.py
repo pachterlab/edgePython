@@ -21,23 +21,38 @@ from .limma_port import is_fullrank
 
 
 def _cox_reid_adjust_from_xtwx(XtWX):
-    """Return -0.5 * log|XtWX| using LDL, matching edgeR's C path."""
-    from scipy.linalg import ldl
+    """Return -0.5 * log|XtWX| with vectorized determinant paths."""
 
     A = np.asarray(XtWX, dtype=np.float64)
     if A.ndim == 2:
         A = A[None, :, :]
 
-    ngenes = A.shape[0]
-    out = np.zeros(ngenes, dtype=np.float64)
-    for g in range(ngenes):
-        # edgeR's C code uses LAPACK Bunch-Kaufman factorization (dsytrf)
-        # and sums half log diagonal terms with clipping; LDL is the same
-        # symmetric-indefinite factorization family.
-        _, dmat, _ = ldl(A[g], lower=True, hermitian=True)
-        diag = np.abs(np.diag(dmat))
-        diag = np.where(diag > 1e-10, diag, 1e-10)
-        out[g] = -0.5 * np.sum(np.log(diag))
+    ngenes, p, _ = A.shape
+    eps = 1e-10
+
+    # Hot path for one-way/two-group designs (p=1 or p=2).
+    if p == 1:
+        d = np.clip(np.abs(A[:, 0, 0]), eps, None)
+        return -0.5 * np.log(d)
+    if p == 2:
+        det = A[:, 0, 0] * A[:, 1, 1] - A[:, 0, 1] * A[:, 1, 0]
+        det = np.clip(np.abs(det), eps, None)
+        return -0.5 * np.log(det)
+
+    # General vectorized path.
+    sign, logabsdet = np.linalg.slogdet(A)
+    out = -0.5 * logabsdet
+
+    # Guard against pathological matrices with a robust LDL fallback.
+    bad = (~np.isfinite(logabsdet)) | (sign == 0)
+    if np.any(bad):
+        from scipy.linalg import ldl
+        for g in np.where(bad)[0]:
+            _, dmat, _ = ldl(A[g], lower=True, hermitian=True)
+            diag = np.abs(np.diag(dmat))
+            diag = np.where(diag > eps, diag, eps)
+            out[g] = -0.5 * np.sum(np.log(diag))
+
     return out
 
 
