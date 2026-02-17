@@ -112,3 +112,12 @@ from .sc_fit import glm_sc_fit, glm_sc_test, shrink_sc_disp
 
 # --- limma utilities ---
 from .limma_port import squeeze_var
+
+# --- voom ---
+from .voom_lmfit import (
+    voom,
+    voom_lmfit,
+    voom_basic,
+    array_weights,
+    duplicate_correlation,
+)
