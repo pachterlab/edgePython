@@ -37,7 +37,8 @@ mcp = FastMCP(
         "Bulk workflow: load_data → filter_genes → normalize → set_design → "
         "estimate_dispersion (or estimate_glm_robust_dispersion) → "
         "voom_transform (optional) → fit_model → test_contrast → "
-        "get_top_genes / generate_plot. "
+        "get_top_genes / generate_plot. DTU: dtu_diff_splice_dge or "
+        "dtu_splice_variants. "
         "Single-cell workflow: load_sc_data → fit_sc_model → test_sc_coef → get_sc_top_genes. "
         "Use describe() or describe_sc() to see current pipeline state."
     ),
@@ -203,6 +204,52 @@ def _append_gene_level_warning(lines: list) -> None:
     warn = _gene_level_warning()
     if warn:
         lines.extend(["", warn])
+
+
+def _resolve_gene_exon_ids(
+    d: dict,
+    gene_column: Optional[str] = None,
+    exon_column: Optional[str] = None,
+):
+    """Resolve gene/exon IDs from DGEList gene annotation or fallback IDs."""
+    genes = d.get("genes")
+    if genes is None:
+        gene_ids = d.get("_gene_ids")
+        if gene_ids is None:
+            raise ValueError("No gene annotation available; provide DGEList genes with GeneID.")
+        gene_ids = np.asarray(gene_ids)
+        exon_ids = np.arange(len(gene_ids))
+        return gene_ids, exon_ids
+
+    gdf = genes if isinstance(genes, pd.DataFrame) else pd.DataFrame(genes)
+
+    if gene_column is not None:
+        if gene_column not in gdf.columns:
+            raise ValueError(f"gene_column '{gene_column}' not found in gene annotation.")
+        gene_ids = gdf[gene_column].astype(str).values
+    else:
+        found = None
+        for col in ("GeneID", "geneid", "gene_id", "Gene"):
+            if col in gdf.columns:
+                found = col
+                break
+        if found is None:
+            raise ValueError("Could not infer gene IDs. Set gene_column explicitly.")
+        gene_ids = gdf[found].astype(str).values
+
+    if exon_column is not None:
+        if exon_column not in gdf.columns:
+            raise ValueError(f"exon_column '{exon_column}' not found in gene annotation.")
+        exon_ids = gdf[exon_column].astype(str).values
+    else:
+        found = None
+        for col in ("ExonID", "exonid", "exon_id", "TranscriptID", "transcript_id"):
+            if col in gdf.columns:
+                found = col
+                break
+        exon_ids = gdf[found].astype(str).values if found is not None else np.arange(len(gene_ids))
+
+    return np.asarray(gene_ids), np.asarray(exon_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -1366,6 +1413,108 @@ def exact_test(
         f"DE genes (FDR < 0.05): {n_up} up, {n_down} down, {n_ns} NS",
     ]
     _append_gene_level_warning(lines)
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Tool 8e: dtu_diff_splice_dge
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def dtu_diff_splice_dge(
+    gene_column: Optional[str] = None,
+    exon_column: Optional[str] = None,
+    prior_count: float = 0.125,
+    name: str = "dtu_diff_splice_dge",
+) -> str:
+    """Run DTU testing with diff_splice_dge on the current DGEList.
+
+    Requires a two-group design in sample metadata (samples['group']).
+    """
+    _require("dgelist", "DGEList")
+    d = _state["dgelist"]
+
+    if d.get("samples") is None or "group" not in d["samples"].columns:
+        raise ValueError("DGEList samples['group'] is required for diff_splice_dge.")
+
+    gene_ids, exon_ids = _resolve_gene_exon_ids(d, gene_column=gene_column, exon_column=exon_column)
+    res = ep.diff_splice_dge(
+        d,
+        geneid=gene_ids,
+        exonid=exon_ids,
+        group=d["samples"]["group"].values,
+        dispersion="auto",
+        prior_count=float(prior_count),
+    )
+
+    _state["results"][name] = res
+    _state["last_result"] = name
+
+    gt = res["gene.table"].copy()
+    sig = gt[gt["FDR"] < 0.05]
+    top = gt.sort_values("FDR", ascending=True).head(5)
+    lines = [
+        f"DTU: diff_splice_dge completed ({len(gt):,} genes).",
+        f"Genes with DTU signal (FDR < 0.05): {len(sig):,}",
+        "",
+        "Top 5 genes by FDR:",
+        f"{'GeneID':<24} {'NExons':>8} {'PValue':>12} {'FDR':>12}",
+        "-" * 62,
+    ]
+    for _, row in top.iterrows():
+        gid = str(row["GeneID"])
+        if len(gid) > 23:
+            gid = gid[:21] + ".."
+        lines.append(
+            f"{gid:<24} {int(row['NExons']):>8d} "
+            f"{float(row['PValue']):>12.2e} {float(row['FDR']):>12.2e}"
+        )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Tool 8f: dtu_splice_variants
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def dtu_splice_variants(
+    gene_column: Optional[str] = None,
+    name: str = "dtu_splice_variants",
+) -> str:
+    """Run splice_variants on the current DGEList to flag genes with isoform heterogeneity."""
+    _require("dgelist", "DGEList")
+    d = _state["dgelist"]
+    gene_ids, _ = _resolve_gene_exon_ids(d, gene_column=gene_column, exon_column=None)
+
+    sv = ep.splice_variants(d, gene_ids)
+    if "FDR" not in sv.columns and "PValue" in sv.columns:
+        _, fdr, _, _ = multipletests(sv["PValue"].values, method="fdr_bh")
+        sv = sv.copy()
+        sv["FDR"] = fdr
+
+    _state["results"][name] = {"table": sv}
+    _state["last_result"] = name
+
+    sig = sv[sv["FDR"] < 0.05] if "FDR" in sv.columns else sv.iloc[0:0]
+    top = sv.sort_values("FDR" if "FDR" in sv.columns else "PValue").head(5)
+
+    lines = [
+        f"DTU: splice_variants completed ({len(sv):,} genes).",
+        f"Genes with splice-variant signal (FDR < 0.05): {len(sig):,}",
+        "",
+        "Top 5 genes:",
+        f"{'GeneID':<24} {'NExons':>8} {'PValue':>12} {'FDR':>12}",
+        "-" * 62,
+    ]
+    for _, row in top.iterrows():
+        gid = str(row["GeneID"])
+        if len(gid) > 23:
+            gid = gid[:21] + ".."
+        fdr_val = float(row["FDR"]) if "FDR" in row.index else np.nan
+        lines.append(
+            f"{gid:<24} {int(row['NExons']):>8d} "
+            f"{float(row['PValue']):>12.2e} {fdr_val:>12.2e}"
+        )
     return "\n".join(lines)
 
 
