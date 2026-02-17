@@ -2,7 +2,24 @@
 
 `edgePython` is a Python implementation of the Bioconductor `edgeR` package for differential analysis of genomics count data. It also includes a new single-cell differential expression method that extends the NEBULA-LN negative binomial mixed model with edgeR's TMM normalization and empirical Bayes dispersion shrinkage.
 
+[![PyPI version](https://img.shields.io/pypi/v/edgepython)](https://pypi.org/project/edgepython/)
+[![PyPI downloads](https://static.pepy.tech/badge/edgepython)](https://pepy.tech/project/edgepython)
+[![License](https://img.shields.io/pypi/l/edgepython)](https://pypi.org/project/edgepython/)
+[![Python versions](https://img.shields.io/pypi/pyversions/edgepython)](https://pypi.org/project/edgepython/)
+
 ## Installation
+
+From PyPI:
+
+```bash
+pip install edgepython
+```
+
+With optional extras from PyPI:
+
+```bash
+pip install "edgepython[all]"
+```
 
 From source:
 
