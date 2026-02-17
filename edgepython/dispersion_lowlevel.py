@@ -21,7 +21,12 @@ from .limma_port import is_fullrank
 
 
 def _cox_reid_adjust_from_xtwx(XtWX):
-    """Return -0.5 * log|XtWX| with vectorized determinant paths."""
+    """Return -0.5 * log|XtWX| with a fast 2x2 path and LDL fallback.
+
+    For the common 2-coefficient bulk design, use a vectorized determinant path
+    and fall back to LDL only for near-singular matrices. This preserves edgeR
+    parity while avoiding per-gene LDL overhead on the hot path.
+    """
 
     A = np.asarray(XtWX, dtype=np.float64)
     if A.ndim == 2:
@@ -29,24 +34,32 @@ def _cox_reid_adjust_from_xtwx(XtWX):
 
     ngenes, p, _ = A.shape
     eps = 1e-10
+    from scipy.linalg import ldl
 
-    # Hot path for one-way/two-group designs (p=1 or p=2).
-    if p == 1:
-        d = np.clip(np.abs(A[:, 0, 0]), eps, None)
-        return -0.5 * np.log(d)
+    # Fast hot-path for the usual two-coefficient design.
     if p == 2:
-        det = A[:, 0, 0] * A[:, 1, 1] - A[:, 0, 1] * A[:, 1, 0]
-        det = np.clip(np.abs(det), eps, None)
-        return -0.5 * np.log(det)
+        ad = A[:, 0, 0] * A[:, 1, 1]
+        bc = A[:, 0, 1] * A[:, 1, 0]
+        det = ad - bc
+        absdet = np.abs(det)
+        out = -0.5 * np.log(np.clip(absdet, eps, None))
 
-    # General vectorized path.
+        # For near-singular matrices, use LDL to match edgeR's C-path behavior.
+        bad = (~np.isfinite(out)) | (absdet < 1e-10)
+        if np.any(bad):
+            for g in np.where(bad)[0]:
+                _, dmat, _ = ldl(A[g], lower=True, hermitian=True)
+                diag = np.abs(np.diag(dmat))
+                diag = np.where(diag > eps, diag, eps)
+                out[g] = -0.5 * np.sum(np.log(diag))
+        return out
+
+    # General path for other design sizes.
+    out = np.zeros(ngenes, dtype=np.float64)
     sign, logabsdet = np.linalg.slogdet(A)
-    out = -0.5 * logabsdet
-
-    # Guard against pathological matrices with a robust LDL fallback.
+    out[:] = -0.5 * logabsdet
     bad = (~np.isfinite(logabsdet)) | (sign == 0)
     if np.any(bad):
-        from scipy.linalg import ldl
         for g in np.where(bad)[0]:
             _, dmat, _ = ldl(A[g], lower=True, hermitian=True)
             diag = np.abs(np.diag(dmat))
