@@ -918,3 +918,155 @@ def estimate_glm_tagwise_disp(y, design=None, offset=None, dispersion=None,
         ave_log_cpm_vals=ave_log_cpm_vals, weights=weights)
 
     return tagwise
+
+
+def _calc_resid(fit, residual_type='pearson'):
+    """Compute GLM residual matrix for robust dispersion fitting."""
+    residual_type = str(residual_type).lower()
+    if residual_type not in ('pearson', 'anscombe', 'deviance'):
+        raise ValueError("residual_type must be one of ('pearson', 'anscombe', 'deviance')")
+
+    mu = np.asarray(fit['fitted.values'], dtype=np.float64)
+    yi = np.asarray(fit['counts'], dtype=np.float64)
+    disp = expand_as_matrix(np.asarray(fit['dispersion'], dtype=np.float64), mu.shape)
+
+    if residual_type == 'pearson':
+        res = (yi - mu) / np.sqrt(np.maximum(mu * (1 + disp * mu), 1e-12))
+    elif residual_type == 'deviance':
+        y_adj = yi + 1e-5
+        with np.errstate(divide='ignore', invalid='ignore'):
+            r = 2 * (y_adj * np.log(np.maximum(y_adj, 1e-12) / np.maximum(mu, 1e-12)) +
+                     (y_adj + 1 / np.maximum(disp, 1e-12)) *
+                     np.log((mu + 1 / np.maximum(disp, 1e-12)) /
+                            (y_adj + 1 / np.maximum(disp, 1e-12))))
+        r = np.maximum(r, 0)
+        res = np.sign(yi - mu) * np.sqrt(r)
+    else:
+        # Numerical approximation to the Anscombe residual integral used by edgeR.
+        from scipy.integrate import quad
+
+        def _anscombe_scalar(yv, muv, dv):
+            if muv <= 0 or yv <= 0:
+                return 0.0
+
+            def ffun(x):
+                return (x * (1 + dv * x)) ** (-1.0 / 3.0)
+
+            const = ffun(muv) ** 0.5
+            if yv == muv:
+                return 0.0
+            val, _ = quad(ffun, muv, yv, limit=50)
+            return const * val
+
+        res = np.zeros_like(yi, dtype=np.float64)
+        for g in range(yi.shape[0]):
+            for s in range(yi.shape[1]):
+                res[g, s] = _anscombe_scalar(yi[g, s], mu[g, s], disp[g, s])
+
+    res[mu == 0] = 0
+    return res
+
+
+def _psi_huber_matrix(u, k=1.345):
+    """Huber psi weights on a residual matrix."""
+    u = np.asarray(u, dtype=np.float64)
+    out = np.ones_like(u, dtype=np.float64)
+    mask = np.abs(u) > k
+    out[mask] = k / np.abs(u[mask])
+    out[~np.isfinite(out)] = 1.0
+    return out
+
+
+def _record_robust_disp_state(y, i, res=None, weights=None, fit=None):
+    """Store per-iteration state for estimate_glm_robust_disp(record=True)."""
+    key = f'iteration_{i}'
+    rec = y.get('record')
+    if rec is None:
+        rec = {
+            'AveLogCPM': {},
+            'trended.dispersion': {},
+            'tagwise.dispersion': {},
+            'weights': {},
+            'res': {},
+            'mu': {}
+        }
+
+    if y.get('AveLogCPM') is not None:
+        rec['AveLogCPM'][key] = np.asarray(y['AveLogCPM']).copy()
+    if y.get('trended.dispersion') is not None:
+        rec['trended.dispersion'][key] = np.asarray(y['trended.dispersion']).copy()
+    if y.get('tagwise.dispersion') is not None:
+        rec['tagwise.dispersion'][key] = np.asarray(y['tagwise.dispersion']).copy()
+    if weights is not None:
+        rec['weights'][key] = np.asarray(weights).copy()
+    if res is not None:
+        rec['res'][key] = np.asarray(res).copy()
+    if fit is not None and fit.get('fitted.values') is not None:
+        rec['mu'][key] = np.asarray(fit['fitted.values']).copy()
+
+    y['record'] = rec
+    return y
+
+
+def estimate_glm_robust_disp(y, design=None, prior_df=10, update_trend=True,
+                             trend_method='bin.loess', maxit=6, k=1.345,
+                             residual_type='pearson', verbose=False,
+                             record=False):
+    """Robust GLM dispersion estimation via iterative Huber reweighting.
+
+    Port of edgeR's estimateGLMRobustDisp.
+    """
+    from .utils import _resolve_design
+    design = _resolve_design(design, y)
+
+    if not (isinstance(y, dict) and 'counts' in y):
+        raise ValueError("Input must be a DGEList-like dict with 'counts'.")
+
+    from .dgelist import valid_dgelist
+    y = valid_dgelist(y)
+
+    y['weights'] = np.ones_like(np.asarray(y['counts'], dtype=np.float64), dtype=np.float64)
+
+    if y.get('trended.dispersion') is None:
+        y = estimate_glm_trended_disp(y, design=design, method=trend_method,
+                                      weights=y['weights'])
+    if y.get('tagwise.dispersion') is None:
+        y = estimate_glm_tagwise_disp(y, design=design, prior_df=prior_df,
+                                      weights=y['weights'])
+
+    if record:
+        y = _record_robust_disp_state(y, i=0, weights=y['weights'])
+
+    from .glm_fit import glm_fit
+
+    for i in range(1, int(maxit) + 1):
+        if verbose:
+            print(f"Iteration {i}: Re-fitting GLM.")
+
+        fit = glm_fit(y, design=design, prior_count=0)
+        res = _calc_resid(fit, residual_type=residual_type)
+
+        y['weights'] = _psi_huber_matrix(res, k=k)
+        y['AveLogCPM'] = ave_log_cpm(y, dispersion=y.get('trended.dispersion'))
+
+        if update_trend:
+            if verbose:
+                print("Re-estimating trended dispersion.")
+            y = estimate_glm_trended_disp(y, design=design, method=trend_method,
+                                          weights=y['weights'])
+
+        if verbose:
+            print("Re-estimating tagwise dispersion.")
+        y = estimate_glm_tagwise_disp(y, design=design, prior_df=prior_df,
+                                      weights=y['weights'])
+
+        if record:
+            y = _record_robust_disp_state(y, i=i, res=res,
+                                          weights=y['weights'], fit=fit)
+
+    return y
+
+
+def estimateGLMRobustDisp(*args, **kwargs):
+    """Compatibility alias for edgeR-style camelCase naming."""
+    return estimate_glm_robust_disp(*args, **kwargs)

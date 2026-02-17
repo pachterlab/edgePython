@@ -42,6 +42,7 @@ from .dispersion import (
     estimate_glm_common_disp,
     estimate_glm_trended_disp,
     estimate_glm_tagwise_disp,
+    estimate_glm_robust_disp,
 )
 
 # --- GLM fitting ---

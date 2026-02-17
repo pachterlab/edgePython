@@ -141,6 +141,49 @@ def adjusted_profile_lik_grid(grid_dispersions, y, design, offset, weights=None)
     return apl
 
 
+def _apl_sum_oneway_scalar(dispersion, y, design, offset, w, group_cols, lgamma_y1):
+    """Fast sum of Cox-Reid adjusted profile log-likelihood for one-way designs."""
+    from .glm_fit import mglm_one_group
+
+    y = np.asarray(y, dtype=np.float64)
+    offset = np.asarray(offset, dtype=np.float64)
+    w = np.asarray(w, dtype=np.float64)
+    ngenes, _ = y.shape
+    ncoefs = design.shape[1]
+
+    d = float(max(dispersion, 1e-300))
+    mu = np.empty_like(y, dtype=np.float64)
+
+    # Fit each group independently via one-group Fisher scoring.
+    for cols in group_cols:
+        y_g = y[:, cols]
+        off_g = offset[:, cols]
+        w_g = w[:, cols]
+        disp_g = np.full_like(y_g, d)
+        b = mglm_one_group(y_g, dispersion=disp_g, offset=off_g, weights=w_g)
+        mu[:, cols] = np.exp(np.clip(b[:, None] + off_g, -500, 500))
+
+    mu_safe = np.maximum(mu, 1e-300)
+    r = 1.0 / d
+    ll = np.sum(w * (gammaln(y + r) - gammaln(r) - lgamma_y1
+                + r * np.log(r) + y * np.log(mu_safe)
+                - (r + y) * np.log(r + mu_safe)), axis=1)
+
+    working_w = np.maximum(w * mu_safe / (1.0 + d * mu_safe), 1e-300)
+    XtWX = np.einsum('gj,jk,jl->gkl', working_w, design, design)
+
+    if ncoefs == 1:
+        logdet = np.log(np.maximum(XtWX[:, 0, 0], 1e-300))
+    elif ncoefs == 2:
+        det = XtWX[:, 0, 0] * XtWX[:, 1, 1] - XtWX[:, 0, 1] ** 2
+        logdet = np.log(np.maximum(det, 1e-300))
+    else:
+        sign, logdet = np.linalg.slogdet(XtWX)
+        logdet = np.where(sign > 0, logdet, 0.0)
+
+    return float(np.sum(ll - 0.5 * logdet))
+
+
 def adjusted_profile_lik(dispersion, y, design, offset, weights=None,
                          start=None, get_coef=False):
     """Tagwise Cox-Reid adjusted profile log-likelihoods for the dispersion.
@@ -195,12 +238,23 @@ def adjusted_profile_lik(dispersion, y, design, offset, weights=None,
     else:
         w = np.ones_like(y)
 
-    # Fit GLM to get mu
-    from .glm_fit import glm_fit
-    fit = glm_fit(y, design=design, dispersion=disp, offset=offset,
-                  weights=weights, prior_count=0, start=start)
-    mu = fit['fitted.values']
-    beta = fit.get('unshrunk.coefficients', fit['coefficients'])
+    # Fit GLM to get mu.
+    # Fast path for one-way designs avoids glm_fit bookkeeping overhead.
+    from .glm_fit import glm_fit, mglm_one_way
+    from .utils import design_as_factor
+    group = design_as_factor(design)
+    is_oneway = (len(np.unique(group)) == ncoefs)
+
+    if is_oneway:
+        fit = mglm_one_way(y, design=design, group=group, dispersion=disp,
+                           offset=offset, weights=weights, coef_start=start)
+        mu = fit['fitted.values']
+        beta = fit['coefficients']
+    else:
+        fit = glm_fit(y, design=design, dispersion=disp, offset=offset,
+                      weights=weights, prior_count=0, start=start)
+        mu = fit['fitted.values']
+        beta = fit.get('unshrunk.coefficients', fit['coefficients'])
 
     # Compute adjusted profile log-likelihood for all genes (vectorized)
     mu_safe = np.maximum(mu, 1e-300)  # (ngenes, nlibs)
@@ -555,10 +609,31 @@ def disp_cox_reid(y, design=None, offset=None, weights=None, ave_log_cpm_vals=No
         if weights is not None and weights.ndim == 2:
             weights = weights[i]
 
-    # Function to optimize
-    def fun(par):
-        disp = par ** 4
-        return -np.sum(adjusted_profile_lik(disp, y, design, offset, weights=weights))
+    # Function to optimize.
+    # Fast path: one-way designs can evaluate APL sum without generic glm_fit overhead.
+    from .utils import design_as_factor
+    group = design_as_factor(design)
+    is_oneway = len(np.unique(group)) == design.shape[1]
+
+    if weights is None:
+        w = np.ones_like(y)
+    else:
+        w = np.asarray(weights, dtype=np.float64)
+        if w.ndim == 1:
+            w = np.tile(w, (y.shape[0], 1))
+
+    if is_oneway:
+        unique_groups = np.unique(group)
+        group_cols = [np.where(group == grp)[0] for grp in unique_groups]
+        lgamma_y1 = gammaln(y + 1)
+
+        def fun(par):
+            disp = par ** 4
+            return -_apl_sum_oneway_scalar(disp, y, design, offset, w, group_cols, lgamma_y1)
+    else:
+        def fun(par):
+            disp = par ** 4
+            return -np.sum(adjusted_profile_lik(disp, y, design, offset, weights=weights))
 
     # Optimize
     lo = interval[0] ** 0.25
@@ -930,12 +1005,24 @@ def disp_bin_trend(y, design=None, offset=None, df=5, span=0.3,
             bin_d[i - 1] = 0.1
         bin_a[i - 1] = np.mean(bin_ave)
 
-    # If few bins, use linear interpolation
+    # If few bins, use linear interpolation with R's approxfun(rule=2, ties=mean)
+    # behavior: average duplicate x values and clamp to boundary values outside range.
     if nbins < 7:
-        from scipy.interpolate import interp1d
-        f = interp1d(bin_a, np.sqrt(np.maximum(bin_d, 0)),
-                     fill_value='extrapolate', kind='linear')
-        dispersion = f(ave_log_cpm_vals) ** 2
+        x = np.asarray(bin_a, dtype=np.float64)
+        yv = np.sqrt(np.maximum(np.asarray(bin_d, dtype=np.float64), 0))
+        order = np.argsort(x)
+        x = x[order]
+        yv = yv[order]
+        # ties=mean
+        xu, inv = np.unique(x, return_inverse=True)
+        yu = np.zeros_like(xu, dtype=np.float64)
+        cnt = np.zeros_like(xu, dtype=np.float64)
+        for i, idx in enumerate(inv):
+            yu[idx] += yv[i]
+            cnt[idx] += 1.0
+        yu = yu / np.maximum(cnt, 1.0)
+        y_interp = np.interp(ave_log_cpm_vals, xu, yu, left=yu[0], right=yu[-1])
+        dispersion = np.maximum(y_interp ** 2, 0)
         return {'AveLogCPM': ave_log_cpm_vals, 'dispersion': dispersion,
                 'bin.AveLogCPM': bin_a, 'bin.dispersion': bin_d}
 

@@ -255,6 +255,25 @@ class TestRobustEstimation:
         assert abs(np.min(tw) - 0.0972) < 0.01
         assert abs(np.median(tw) - 0.191) < 0.01
 
+    def test_estimate_glm_robust_disp(self, part4_data):
+        d, _, _, design = part4_data
+        out = ep.estimate_glm_robust_disp(d, design=design, maxit=2, record=True)
+
+        assert 'tagwise.dispersion' in out
+        assert out['tagwise.dispersion'].shape[0] == out['counts'].shape[0]
+        assert np.all(np.isfinite(out['tagwise.dispersion']))
+
+        assert 'weights' in out
+        assert out['weights'].shape == out['counts'].shape
+        assert np.all(np.isfinite(out['weights']))
+        assert np.all(out['weights'] > 0)
+        assert np.all(out['weights'] <= 1.0)
+
+        assert 'record' in out
+        assert 'weights' in out['record']
+        assert 'iteration_0' in out['record']['weights']
+        assert 'iteration_1' in out['record']['weights']
+
 
 # ── Dispersion Trend Methods ───────────────────────────────────────
 
