@@ -20,6 +20,27 @@ from .expression import ave_log_cpm
 from .limma_port import is_fullrank
 
 
+def _cox_reid_adjust_from_xtwx(XtWX):
+    """Return -0.5 * log|XtWX| using LDL, matching edgeR's C path."""
+    from scipy.linalg import ldl
+
+    A = np.asarray(XtWX, dtype=np.float64)
+    if A.ndim == 2:
+        A = A[None, :, :]
+
+    ngenes = A.shape[0]
+    out = np.zeros(ngenes, dtype=np.float64)
+    for g in range(ngenes):
+        # edgeR's C code uses LAPACK Bunch-Kaufman factorization (dsytrf)
+        # and sums half log diagonal terms with clipping; LDL is the same
+        # symmetric-indefinite factorization family.
+        _, dmat, _ = ldl(A[g], lower=True, hermitian=True)
+        diag = np.abs(np.diag(dmat))
+        diag = np.where(diag > 1e-10, diag, 1e-10)
+        out[g] = -0.5 * np.sum(np.log(diag))
+    return out
+
+
 def adjusted_profile_lik_grid(grid_dispersions, y, design, offset, weights=None):
     """Evaluate APL at multiple dispersion grid points efficiently.
 
@@ -127,16 +148,7 @@ def adjusted_profile_lik_grid(grid_dispersions, y, design, offset, weights=None)
 
         XtWX = np.einsum('gj,jk,jl->gkl', working_w, design, design)
 
-        if ncoefs == 1:
-            logdet = np.log(np.maximum(XtWX[:, 0, 0], 1e-300))
-        elif ncoefs == 2:
-            det = XtWX[:, 0, 0] * XtWX[:, 1, 1] - XtWX[:, 0, 1] ** 2
-            logdet = np.log(np.maximum(det, 1e-300))
-        else:
-            sign, logdet = np.linalg.slogdet(XtWX)
-            logdet = np.where(sign > 0, logdet, 0.0)
-
-        apl[:, gi] = ll - 0.5 * logdet
+        apl[:, gi] = ll + _cox_reid_adjust_from_xtwx(XtWX)
 
     return apl
 
@@ -172,16 +184,7 @@ def _apl_sum_oneway_scalar(dispersion, y, design, offset, w, group_cols, lgamma_
     working_w = np.maximum(w * mu_safe / (1.0 + d * mu_safe), 1e-300)
     XtWX = np.einsum('gj,jk,jl->gkl', working_w, design, design)
 
-    if ncoefs == 1:
-        logdet = np.log(np.maximum(XtWX[:, 0, 0], 1e-300))
-    elif ncoefs == 2:
-        det = XtWX[:, 0, 0] * XtWX[:, 1, 1] - XtWX[:, 0, 1] ** 2
-        logdet = np.log(np.maximum(det, 1e-300))
-    else:
-        sign, logdet = np.linalg.slogdet(XtWX)
-        logdet = np.where(sign > 0, logdet, 0.0)
-
-    return float(np.sum(ll - 0.5 * logdet))
+    return float(np.sum(ll + _cox_reid_adjust_from_xtwx(XtWX)))
 
 
 def adjusted_profile_lik(dispersion, y, design, offset, weights=None,
@@ -287,17 +290,7 @@ def adjusted_profile_lik(dispersion, y, design, offset, weights=None,
     # XtWX[g, k, l] = sum_j working_w[g,j] * design[j,k] * design[j,l]
     XtWX = np.einsum('gj,jk,jl->gkl', working_w, design, design)  # (ngenes, ncoefs, ncoefs)
 
-    # Log determinant for all genes
-    if ncoefs == 1:
-        logdet = np.log(np.maximum(XtWX[:, 0, 0], 1e-300))
-    elif ncoefs == 2:
-        det = XtWX[:, 0, 0] * XtWX[:, 1, 1] - XtWX[:, 0, 1] ** 2
-        logdet = np.log(np.maximum(det, 1e-300))
-    else:
-        sign, logdet = np.linalg.slogdet(XtWX)
-        logdet = np.where(sign > 0, logdet, 0.0)
-
-    cr_adj = -0.5 * logdet
+    cr_adj = _cox_reid_adjust_from_xtwx(XtWX)
     apl = ll + cr_adj
 
     if get_coef:
