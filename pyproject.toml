@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "edgepython"
-version = "0.1.0"
+version = "0.2.2"
 description = "Python port of the edgeR Bioconductor package for differential expression analysis of digital gene expression data."
 readme = "README.md"
 license = "GPL-3.0-or-later"

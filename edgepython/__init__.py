@@ -5,7 +5,7 @@ edgePython: Python port of the edgeR Bioconductor package.
 Empirical analysis of digital gene expression data in Python.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.2"
 
 # --- Classes ---
 from .classes import DGEList, DGEExact, DGEGLM, DGELRT, TopTags
