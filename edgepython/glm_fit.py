@@ -331,6 +331,8 @@ def glm_fit(y, design=None, dispersion=None, offset=None, lib_size=None,
     dispersion = np.atleast_1d(np.asarray(dispersion, dtype=np.float64))
     if np.any(np.isnan(dispersion)):
         raise ValueError("NA dispersions not allowed")
+    if np.any(dispersion < 0):
+        raise ValueError("Negative dispersions not allowed")
 
     # Build offset from lib_size and offset
     if offset is not None:

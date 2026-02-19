@@ -67,6 +67,8 @@ def mglm_levenberg(y, design, dispersion=0, offset=0, weights=None,
     # Expand offset, dispersion, weights
     offset_mat = _expand_compressed(offset, y.shape)
     disp_mat = _expand_compressed(dispersion, y.shape)
+    if np.any(np.asarray(disp_mat, dtype=np.float64) < 0):
+        raise ValueError("Negative dispersions not allowed")
     if weights is not None:
         w_mat = _expand_compressed(weights, y.shape)
     else:
