@@ -684,6 +684,8 @@ def _cv_offset(offset: np.ndarray | None, nind: int):
         return log_offset, 0.0, 0.0
 
     offset = np.asarray(offset, dtype=np.float64)
+    if np.any(~np.isfinite(offset)) or np.any(offset <= 0):
+        raise ValueError("offset must contain positive finite values")
     moffset_raw = offset.mean()
     cv = 0.0
     if moffset_raw > 0:

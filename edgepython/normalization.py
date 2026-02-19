@@ -405,8 +405,10 @@ def normalize_chip_to_input(input_counts, response, dispersion=0.01, niter=6,
         return {'p_value': np.zeros(n), 'pmid_value': np.zeros(n),
                 'scaling_factor': 0.0, 'prop_enriched': 1.0}
     if n == 1:
+        # Avoid inf for response=0 in single-feature inputs.
+        sf = 0.0 if response[0] <= 0 else float(input_counts[0] / response[0])
         return {'p_value': np.array([1.0]), 'pmid_value': np.array([1.0]),
-                'scaling_factor': float(input_counts[0] / response[0]),
+                'scaling_factor': sf,
                 'prop_enriched': 0.0}
 
     # Replace zero inputs with minimum positive value

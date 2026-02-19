@@ -279,7 +279,8 @@ def diff_splice(glmfit, coef=None, contrast=None, geneid=None, exonid=None,
 
         gene_s2_num = np.zeros(ngenes)
         np.add.at(gene_s2_num, g, exon_deviance)
-        gene_s2 = gene_s2_num / gene_df_residual
+        gene_s2 = np.zeros_like(gene_s2_num)
+        np.divide(gene_s2_num, gene_df_residual, out=gene_s2, where=gene_df_residual > 0)
 
         squeeze = squeeze_var(gene_s2, gene_df_residual, robust=robust)
         gene_df_total = gene_df_residual + squeeze['df_prior']

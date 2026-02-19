@@ -139,6 +139,8 @@ def estimate_disp(y, design=None, group=None, lib_size=None, offset=None,
     if lib_size is None:
         lib_size = y.sum(axis=0)
     lib_size = np.asarray(lib_size, dtype=np.float64)
+    if np.any(~np.isfinite(lib_size)) or np.any(lib_size <= 0):
+        raise ValueError("library sizes must be positive finite values")
 
     # Build offset
     if offset is None:
@@ -468,6 +470,8 @@ def estimate_common_disp(y, group=None, lib_size=None, tol=1e-6,
     if lib_size is None:
         lib_size = y.sum(axis=0)
     lib_size = np.asarray(lib_size, dtype=np.float64)
+    if np.any(~np.isfinite(lib_size)) or np.any(lib_size <= 0):
+        raise ValueError("library sizes must be positive finite values")
 
     # Filter
     keep = y.sum(axis=1) >= rowsum_filter
@@ -572,12 +576,19 @@ def estimate_tagwise_disp(y, group=None, lib_size=None, dispersion=None,
     if lib_size is None:
         lib_size = y.sum(axis=0)
     lib_size = np.asarray(lib_size, dtype=np.float64)
+    if np.any(~np.isfinite(lib_size)) or np.any(lib_size <= 0):
+        raise ValueError("library sizes must be positive finite values")
 
     if dispersion is None:
         dispersion = 0.1
 
     if span is None:
         span = (10 / ntags) ** 0.23 if ntags > 10 else 1.0
+
+    ngroups = len(np.unique(group))
+    if ngroups >= nlibs:
+        warnings.warn("No residual df: cannot estimate tagwise dispersion")
+        return np.full(ntags, np.nan)
 
     # Equalize library sizes
     from .exact_test import equalize_lib_sizes, split_into_groups
@@ -605,7 +616,7 @@ def estimate_tagwise_disp(y, group=None, lib_size=None, dispersion=None,
     alc = ave_log_cpm(y, lib_size=lib_size)
 
     # Use WLEB
-    prior_n = prior_df / (nlibs - len(np.unique(group)))
+    prior_n = prior_df / (nlibs - ngroups)
 
     out = WLEB(theta=spline_pts, loglik=l0, prior_n=prior_n,
                covariate=alc, trend_method='movingave' if trend == 'movingave' else
@@ -743,7 +754,14 @@ def estimate_glm_common_disp(y, design=None, offset=None, method='CoxReid',
         return np.nan
 
     if offset is None:
-        offset = np.log(y.sum(axis=0))
+        lib_size = y.sum(axis=0)
+        if np.any(lib_size <= 0):
+            raise ValueError("library sizes must be positive to compute offsets")
+        offset = np.log(lib_size)
+    else:
+        offset = np.asarray(offset, dtype=np.float64)
+        if not np.all(np.isfinite(offset)):
+            raise ValueError("offsets must be finite values")
 
     if ave_log_cpm_vals is None:
         ave_log_cpm_vals = ave_log_cpm(y, offset=offset, weights=weights)
@@ -816,7 +834,14 @@ def estimate_glm_trended_disp(y, design=None, offset=None,
         return np.full(ntags, np.nan)
 
     if offset is None:
-        offset = np.log(y.sum(axis=0))
+        lib_size = y.sum(axis=0)
+        if np.any(lib_size <= 0):
+            raise ValueError("library sizes must be positive to compute offsets")
+        offset = np.log(lib_size)
+    else:
+        offset = np.asarray(offset, dtype=np.float64)
+        if not np.all(np.isfinite(offset)):
+            raise ValueError("offsets must be finite values")
 
     if ave_log_cpm_vals is None:
         ave_log_cpm_vals = ave_log_cpm(y, offset=offset, weights=weights)
@@ -904,7 +929,14 @@ def estimate_glm_tagwise_disp(y, design=None, offset=None, dispersion=None,
         return np.full(ntags, np.nan)
 
     if offset is None:
-        offset = np.log(y.sum(axis=0))
+        lib_size = y.sum(axis=0)
+        if np.any(lib_size <= 0):
+            raise ValueError("library sizes must be positive to compute offsets")
+        offset = np.log(lib_size)
+    else:
+        offset = np.asarray(offset, dtype=np.float64)
+        if not np.all(np.isfinite(offset)):
+            raise ValueError("offsets must be finite values")
 
     if span is None:
         span = (10 / ntags) ** 0.23 if ntags > 10 else 1.0

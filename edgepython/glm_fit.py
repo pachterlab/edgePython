@@ -337,11 +337,18 @@ def glm_fit(y, design=None, dispersion=None, offset=None, lib_size=None,
     # Build offset from lib_size and offset
     if offset is not None:
         offset = np.asarray(offset, dtype=np.float64)
+        if not np.all(np.isfinite(offset)):
+            raise ValueError("offsets must be finite values")
     elif lib_size is not None:
         lib_size = np.asarray(lib_size, dtype=np.float64)
+        if np.any(~np.isfinite(lib_size)) or np.any(lib_size <= 0):
+            raise ValueError("library sizes must be positive finite values")
         offset = np.log(lib_size)
     else:
-        offset = np.log(y.sum(axis=0))
+        lib_size = y.sum(axis=0)
+        if np.any(lib_size <= 0):
+            raise ValueError("library sizes must be positive to compute offsets")
+        offset = np.log(lib_size)
 
     offset_mat = expand_as_matrix(offset, (ntag, nlib))
     disp_mat = expand_as_matrix(dispersion, (ntag, nlib))

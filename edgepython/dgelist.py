@@ -280,6 +280,9 @@ def get_offset(y):
     if norm_factors is not None:
         lib_size = lib_size * norm_factors.values
 
+    if np.any(~np.isfinite(lib_size)) or np.any(lib_size <= 0):
+        raise ValueError("library sizes must be positive finite values")
+
     return np.log(lib_size)
 
 
