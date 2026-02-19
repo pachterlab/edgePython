@@ -143,7 +143,12 @@ pytest -q
 
 ## Authorship
 
-This code was written by Claude (Anthropic). The project was directed by Lior Pachter.
+The code was written primarily by Claude (Anthropic) and Codex (OpenAI). The project was directed by Lior Pachter.
+
+A detailed description of the project, methods, and benchmarks is available in the associated preprint:
+
+Pachter, L., Differential analysis of genomics count data with edge* (2026). *bioRxiv*. https://doi.org/10.64898/2026.02.16.706223
+
 
 ## edgeR
 
