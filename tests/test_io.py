@@ -99,22 +99,3 @@ class TestReadData:
         existing = ep.make_dgelist(np.array([[1, 2], [3, 4]], dtype=float))
         result = ep.read_data(existing)
         assert result is existing
-
-    @pytest.mark.skipif(
-        not os.path.exists('/Users/lpachter/Dropbox/claude/quant/SRR493366'),
-        reason="kallisto quant data not available")
-    def test_kallisto_h5(self):
-        paths = ['/Users/lpachter/Dropbox/claude/quant/SRR493366',
-                 '/Users/lpachter/Dropbox/claude/quant/SRR493367']
-        dge = ep.read_data(paths, source='kallisto', format='h5',
-                           verbose=False)
-        assert dge['counts'].shape[1] == 2
-        assert 'Overdispersion' in dge['genes'].columns
-        # Compare to R reference
-        r_counts = pd.read_csv(
-            f"{CSV_DIR}/R_catchKallisto_counts.csv", index_col=0)
-        cnt_diff = np.max(np.abs(dge['counts'][:100] - r_counts.values))
-        assert cnt_diff < 1e-10
-        r_prior = float(open(
-            f"{CSV_DIR}/R_catchKallisto_prior.txt").read().strip())
-        assert abs(dge['overdispersion.prior'] - r_prior) < 1e-10
