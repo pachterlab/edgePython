@@ -52,6 +52,21 @@ class TestCommonDispersion:
         # R: 0.2408
         assert abs(d2['common.dispersion'] - 0.2408) < 0.01
 
+    def test_common_disp_two_pass_equalization(self):
+        y = np.array([
+            [1, 2, 20, 25, 4, 1],
+            [50, 55, 0, 0, 4, 1],
+            [100, 120, 3, 4, 2, 5],
+            [80, 90, 7, 8, 10, 12],
+        ], dtype=float)
+        group = np.array(["A", "A", "B", "B", "A", "B"])
+        d = ep.make_dgelist(counts=y, group=group)
+
+        d = ep.estimate_common_disp(d)
+
+        # edgeR estimateCommonDisp: 0.339898452813
+        assert abs(d['common.dispersion'] - 0.339898452813) < 1e-8
+
 
 # ── Tagwise Dispersion ──────────────────────────────────────────────
 

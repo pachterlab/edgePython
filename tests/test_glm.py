@@ -112,6 +112,32 @@ class TestGlmFitLRT:
         assert abs(np.median(coef[:, 1]) - 0.1508) < 0.01
         assert abs(np.max(coef[:, 1]) - 1.609) < 0.01
 
+    def test_glm_lrt_coef_is_design_contrast_for_sparse_genes(self):
+        y = np.array([
+            [0, 0, 0, 1, 0, 100, 120, 110, 130, 125],
+            [10, 11, 9, 12, 10, 20, 22, 21, 19, 23],
+        ], dtype=float)
+        group = np.array(["Normal"] * 5 + ["Tumor"] * 5)
+        d = ep.make_dgelist(counts=y, group=group)
+        design = ep.model_matrix("~ group", {"group": d["samples"]["group"]})
+
+        fit = ep.glm_fit(d, design=design, dispersion=0.1, prior_count=0)
+        lrt = ep.glm_lrt(fit, coef=1)
+
+        # edgeR glmFit coefficients for model.matrix(~group), prior.count=0.
+        expected_coef = np.array([
+            [-3.97439084, 3.80845401],
+            [-0.01712633, -1.86212792],
+        ])
+        np.testing.assert_allclose(fit["coefficients"], expected_coef,
+                                   rtol=1e-7, atol=1e-7)
+        np.testing.assert_allclose(
+            lrt["table"]["logFC"].values,
+            expected_coef[:, 1] / np.log(2),
+            rtol=1e-7,
+            atol=1e-7,
+        )
+
 
 # ── Continuous covariate ────────────────────────────────────────────
 

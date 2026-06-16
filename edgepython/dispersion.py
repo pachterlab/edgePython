@@ -493,28 +493,30 @@ def estimate_common_disp(y, group=None, lib_size=None, tol=1e-6,
         raise ValueError("library sizes must be positive finite values")
 
     # Filter
-    keep = y.sum(axis=1) >= rowsum_filter
+    keep = y.sum(axis=1) > rowsum_filter
     y_filt = y[keep]
 
     if y_filt.shape[0] == 0:
         warnings.warn("No genes pass rowsum filter")
         return 0.1
 
-    # Equalize library sizes and split into groups
+    # Equalize library sizes and split into groups. edgeR repeats this
+    # equalize/optimize cycle once after updating the dispersion estimate.
     from .exact_test import equalize_lib_sizes, split_into_groups
 
-    # First pass with rough dispersion
-    eq = equalize_lib_sizes(y_filt, group=group, dispersion=0.01, lib_size=lib_size)
-    y_pseudo = eq['pseudo.counts']
-    y_split = split_into_groups(y_pseudo, group=group)
+    disp = 0.01
+    for _ in range(2):
+        eq = equalize_lib_sizes(
+            y_filt, group=group, dispersion=disp, lib_size=lib_size)
+        y_pseudo = eq['pseudo.counts']
+        y_split = split_into_groups(y_pseudo, group=group)
 
-    # Optimize
-    result = minimize_scalar(
-        lambda d: -common_cond_log_lik_der_delta(y_split, d, der=0),
-        bounds=(1e-4, 100 / 101), method='bounded',
-        options={'xatol': tol})
-    delta = result.x
-    disp = delta / (1 - delta)
+        result = minimize_scalar(
+            lambda d: -common_cond_log_lik_der_delta(y_split, d, der=0),
+            bounds=(1e-4, 100 / 101), method='bounded',
+            options={'xatol': tol})
+        delta = result.x
+        disp = delta / (1 - delta)
 
     if verbose:
         print(f"Disp = {disp:.5f}, BCV = {np.sqrt(disp):.4f}")
