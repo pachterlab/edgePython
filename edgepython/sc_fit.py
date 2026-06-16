@@ -980,6 +980,38 @@ def _fit_gene_nebula_ln(gene_idx, y_gene, X, offset, fid, cumsumy_gene,
     return beta_rescaled, se_rescaled, sigma2, inv_phi, conv, fit, logw
 
 
+_GLM_SC_FIT_WORKER_STATE = None
+
+
+def _glm_sc_fit_init_worker(state):
+    """Store immutable fit state once per worker process."""
+    global _GLM_SC_FIT_WORKER_STATE
+    _GLM_SC_FIT_WORKER_STATE = state
+
+
+def _glm_sc_fit_one(idx, state):
+    g = state['gid'][idx]
+    counts = state['counts']
+    if hasattr(counts, 'toarray'):
+        y_gene = np.asarray(counts[g, :].toarray()).ravel()
+    else:
+        y_gene = counts[g, :]
+    return _fit_gene_nebula_ln(
+        g, y_gene, state['pred'], state['log_offset'], state['fid'],
+        state['cumsumy'][g, :], state['posind_per_gene'][idx],
+        state['nb'], state['nind'], state['k'], state['sds'],
+        state['int_col'], state['moffset'], state['min_bounds'],
+        state['max_bounds'], state['mfs'], state['cutoff_cell'],
+        state['kappa'],
+    )
+
+
+def _glm_sc_fit_one_worker(idx):
+    if _GLM_SC_FIT_WORKER_STATE is None:
+        raise RuntimeError("glm_sc_fit worker state has not been initialized.")
+    return _glm_sc_fit_one(idx, _GLM_SC_FIT_WORKER_STATE)
+
+
 # ---------------------------------------------------------------------------
 # Main entry points
 # ---------------------------------------------------------------------------
@@ -1222,28 +1254,41 @@ def glm_sc_fit(y, cell_meta=None, design=None, sample=None,
     posind_per_gene = [np.where(cumsumy[g, :] > 0)[0] for g in gid]
 
     # --- Per-gene fitting ---
-    def _fit_one(idx):
-        g = gid[idx]
-        if hasattr(counts, 'toarray'):
-            y_gene = np.asarray(counts[g, :].toarray()).ravel()
-        else:
-            y_gene = counts[g, :]
-        return _fit_gene_nebula_ln(
-            g, y_gene, pred, log_offset, fid, cumsumy[g, :],
-            posind_per_gene[idx], nb, nind, k, sds, int_col, moffset,
-            min_bounds, max_bounds, mfs, cutoff_cell, kappa,
-        )
+    fit_state = {
+        'counts': counts,
+        'gid': gid,
+        'pred': pred,
+        'log_offset': log_offset,
+        'fid': fid,
+        'cumsumy': cumsumy,
+        'posind_per_gene': posind_per_gene,
+        'nb': nb,
+        'nind': nind,
+        'k': k,
+        'sds': sds,
+        'int_col': int_col,
+        'moffset': moffset,
+        'min_bounds': min_bounds,
+        'max_bounds': max_bounds,
+        'mfs': mfs,
+        'cutoff_cell': cutoff_cell,
+        'kappa': kappa,
+    }
 
     if ncore > 1:
         # Parallel execution
-        with ProcessPoolExecutor(max_workers=ncore) as executor:
-            results = list(executor.map(_fit_one, range(lgid)))
+        with ProcessPoolExecutor(
+            max_workers=ncore,
+            initializer=_glm_sc_fit_init_worker,
+            initargs=(fit_state,),
+        ) as executor:
+            results = list(executor.map(_glm_sc_fit_one_worker, range(lgid)))
     else:
         results = []
         for idx in range(lgid):
             if verbose and lgid > 100 and idx % max(1, lgid // 10) == 0:
                 print(f"  Gene {idx + 1}/{lgid}...")
-            results.append(_fit_one(idx))
+            results.append(_glm_sc_fit_one(idx, fit_state))
 
     # --- Collect results ---
     coefficients = np.zeros((lgid, nb))

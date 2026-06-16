@@ -139,6 +139,42 @@ class TestGlmScFitStructure:
     def test_predictor_names_twogp(self, twogp_fit):
         assert twogp_fit['predictor_names'] == ['Intercept', 'groupB']
 
+    def test_parallel_ncore_matches_sequential(self, sc_data, twogp_design):
+        counts = sc_data['counts'][:8, :]
+        fit_seq = ep.glm_sc_fit(
+            counts,
+            design=twogp_design,
+            sample=sc_data['sample_ids'],
+            norm_method='none',
+            verbose=False,
+            ncore=1,
+        )
+        fit_parallel = ep.glm_sc_fit(
+            counts,
+            design=twogp_design,
+            sample=sc_data['sample_ids'],
+            norm_method='none',
+            verbose=False,
+            ncore=2,
+        )
+
+        np.testing.assert_allclose(
+            fit_parallel['coefficients'],
+            fit_seq['coefficients'],
+            rtol=1e-10,
+            atol=1e-10,
+        )
+        np.testing.assert_allclose(
+            fit_parallel['se'],
+            fit_seq['se'],
+            rtol=1e-10,
+            atol=1e-10,
+        )
+        np.testing.assert_array_equal(
+            fit_parallel['convergence'],
+            fit_seq['convergence'],
+        )
+
 
 # ---------------------------------------------------------------------------
 # glm_sc_fit: numerical correctness
