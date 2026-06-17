@@ -149,6 +149,31 @@ def _lib_sizes(counts, lib_size=None):
     return lib_size
 
 
+def _combine_lib_size_offsets(counts, lib_size, offset=None, offset_prior=None):
+    lib_size_matrix = np.tile(lib_size[None, :], (counts.shape[0], 1))
+    offset_prior_mat = None
+
+    if offset is not None:
+        offset = np.asarray(offset, dtype=np.float64)
+        if offset.shape != counts.shape:
+            raise ValueError("counts and offset must have equal dimensions")
+        if offset_prior is None:
+            offset_prior_mat = offset - np.mean(offset, axis=1, keepdims=True)
+        else:
+            warnings.warn("Ignoring offset in favor of offset_prior. Should not set both.",
+                          stacklevel=2)
+
+    if offset_prior is not None:
+        offset_prior_mat = np.asarray(offset_prior, dtype=np.float64)
+        if offset_prior_mat.shape != counts.shape:
+            raise ValueError("counts and offset_prior must have equal dimensions")
+
+    if offset_prior_mat is not None:
+        lib_size_matrix = np.exp(np.log(lib_size_matrix) + offset_prior_mat)
+
+    return lib_size_matrix, offset_prior_mat
+
+
 def _hat_diag(design):
     x = np.asarray(design, dtype=np.float64)
     with np.errstate(invalid="ignore"):
@@ -1028,10 +1053,10 @@ def _detect_structural_zeros(counts, design, lib_size, eps=1e-4):
     return row_has_exact, is_zero
 
 
-def _compute_voom_weights_from_fit(fit, design, lib_size, trend_x, trend_y):
+def _compute_voom_weights_from_fit(fit, design, lib_size_matrix, trend_x, trend_y):
     fitted_values = fit.fitted_values
     fitted_cpm = np.power(2.0, fitted_values)
-    fitted_count = 1e-6 * fitted_cpm * (lib_size[None, :] + 1.0)
+    fitted_count = 1e-6 * fitted_cpm * (lib_size_matrix + 1.0)
     fitted_logcount = np.log2(np.clip(fitted_count, _EPS, None))
 
     trend = _interp_extrap(fitted_logcount, trend_x, trend_y)
@@ -1044,9 +1069,11 @@ def voom(
     counts,
     design=None,
     lib_size=None,
+    offset=None,
+    offset_prior=None,
     normalize_method="none",
     span=0.5,
-    adaptive_span=False,
+    adaptive_span=True,
     block=None,
     correlation=None,
     prior_weights=None,
@@ -1067,6 +1094,8 @@ def voom(
 
     design = _validate_design(design, n_samples)
     lib_size = _lib_sizes(counts, lib_size=lib_size)
+    lib_size_matrix, offset_prior_mat = _combine_lib_size_offsets(
+        counts, lib_size, offset=offset, offset_prior=offset_prior)
 
     prior_w = _as_matrix_weights(prior_weights, counts.shape) if prior_weights is not None else None
 
@@ -1077,7 +1106,7 @@ def voom(
     if adaptive_span:
         span = choose_lowess_span(n_genes, small_n=50, min_span=0.3, power=1 / 3)
 
-    y = np.log2((counts + 0.5) / (lib_size[None, :] + 1.0) * 1e6)
+    y = np.log2((counts + 0.5) / (lib_size_matrix + 1.0) * 1e6)
     y = _normalize_between_arrays(y, method=normalize_method)
 
     fit = _lm_fit(y, design, weights=prior_w, block=block, correlation=correlation)
@@ -1117,6 +1146,8 @@ def voom(
             "df_residual": fit.df_residual,
             "Amean": np.nanmean(y, axis=1),
             "lib_size": lib_size,
+            "lib_size_matrix": lib_size_matrix,
+            "offset_prior": offset_prior_mat,
             "span": float(span),
         }
         return out
@@ -1138,7 +1169,7 @@ def voom(
         weighted=any_zero_rows,
     )
 
-    w_voom = _compute_voom_weights_from_fit(fit, design, lib_size, trend_x, trend_y)
+    w_voom = _compute_voom_weights_from_fit(fit, design, lib_size_matrix, trend_x, trend_y)
 
     if prior_w is not None:
         weights = w_voom * prior_w
@@ -1201,7 +1232,7 @@ def voom(
             weighted=any_zero_rows,
         )
 
-        w_voom = _compute_voom_weights_from_fit(fit2, design, lib_size, trend_x, trend_y)
+        w_voom = _compute_voom_weights_from_fit(fit2, design, lib_size_matrix, trend_x, trend_y)
         if prior_w is not None:
             weights = w_voom * prior_w
         else:
@@ -1256,6 +1287,8 @@ def voom(
         "E": y,
         "Amean": amean,
         "lib_size": lib_size,
+        "lib_size_matrix": lib_size_matrix,
+        "offset_prior": offset_prior_mat,
         "span": float(span),
         "correlation": corr,
         "sample_weights": sw,
@@ -1292,9 +1325,11 @@ def voom_lmfit(
     var_group=None,
     prior_n=10.0,
     lib_size=None,
+    offset=None,
+    offset_prior=None,
     normalize_method="none",
     span=0.5,
-    adaptive_span=False,
+    adaptive_span=True,
     save_plot=False,
     keep_elist=True,
 ):
@@ -1303,6 +1338,8 @@ def voom_lmfit(
         counts=counts,
         design=design,
         lib_size=lib_size,
+        offset=offset,
+        offset_prior=offset_prior,
         normalize_method=normalize_method,
         span=span,
         adaptive_span=adaptive_span,

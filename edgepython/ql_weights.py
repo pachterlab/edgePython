@@ -659,6 +659,96 @@ def compute_adjust_vec(y, mu, design, dispersion, prior, weights=None):
     return {'df': df_out, 'deviance': dev_out, 's2': s2_out}
 
 
+@njit(cache=True, parallel=True)
+def _compute_adjust_mat_inner(y, mu, design, disp_mat, w_mat, prior,
+                              unit_df_out, unit_dev_out, leverage_out):
+    """Numba-compiled inner loop for compute_adjust_mat."""
+    ntag = y.shape[0]
+    nlib = y.shape[1]
+    ncoef = design.shape[1]
+
+    for tag in prange(ntag):
+        yrow = y[tag]
+        urow = mu[tag]
+        drow = disp_mat[tag]
+        wrow = w_mat[tag]
+
+        zwpt = np.empty(nlib)
+        for j in range(nlib):
+            zwpt[j] = math.sqrt(urow[j] / (1.0 + urow[j] * drow[j] * wrow[j] / prior))
+
+        Xw = np.empty((nlib, ncoef))
+        for j in range(nlib):
+            for k in range(ncoef):
+                Xw[j, k] = design[j, k] * zwpt[j]
+
+        XtX = Xw.T @ Xw
+        diag_max = 0.0
+        for k in range(ncoef):
+            if XtX[k, k] > diag_max:
+                diag_max = XtX[k, k]
+        eps = 1e-10 * diag_max if diag_max > 0 else 1e-15
+        for k in range(ncoef):
+            XtX[k, k] += eps
+        XtXinv = np.linalg.inv(XtX)
+        P = Xw @ XtXinv
+
+        for lib in range(nlib):
+            h = 0.0
+            for k in range(ncoef):
+                h += P[lib, k] * Xw[lib, k]
+            alpha, kappa = compute_weight(urow[lib], drow[lib], prior / wrow[lib])
+            udp = compute_unit_nb_deviance(yrow[lib], urow[lib], drow[lib] * wrow[lib] / prior)
+            hdp = 1.0 - h
+            if hdp < THRESHOLD_ZERO:
+                udp = 0.0
+                hdp = 0.0
+
+            unit_dev_out[tag, lib] = udp * alpha
+            unit_df_out[tag, lib] = hdp * kappa
+            leverage_out[tag, lib] = h
+
+
+def compute_adjust_mat(y, mu, design, dispersion, prior, weights=None):
+    """Compute adjusted unit deviance, unit df, and leverage matrices.
+
+    Port of ql_glm.c compute_adjust_mat().
+    """
+    ntag, nlib = y.shape
+
+    disp = np.atleast_1d(np.asarray(dispersion, dtype=np.float64))
+    if disp.ndim == 0 or disp.size == 1:
+        disp_mat = np.full((ntag, nlib), float(disp.ravel()[0]))
+    elif disp.ndim == 1 and len(disp) == ntag:
+        disp_mat = np.tile(disp[:, None], (1, nlib))
+    elif disp.ndim == 2:
+        disp_mat = disp
+    else:
+        disp_mat = np.broadcast_to(disp, (ntag, nlib)).copy()
+
+    if weights is None:
+        w_mat = np.ones((ntag, nlib), dtype=np.float64)
+    else:
+        w_mat = np.asarray(weights, dtype=np.float64)
+        if w_mat.ndim == 0 or w_mat.size == 1:
+            w_mat = np.full((ntag, nlib), float(w_mat.ravel()[0]))
+        elif w_mat.shape != (ntag, nlib):
+            w_mat = np.broadcast_to(w_mat, (ntag, nlib)).copy()
+
+    unit_df = np.zeros((ntag, nlib))
+    unit_deviance = np.zeros((ntag, nlib))
+    leverage = np.zeros((ntag, nlib))
+
+    _compute_adjust_mat_inner(y, mu, design, disp_mat, w_mat, prior,
+                              unit_df, unit_deviance, leverage)
+
+    return {
+        'unit.df': unit_df,
+        'unit.deviance': unit_deviance,
+        'leverage': leverage,
+    }
+
+
 # ---------------------------------------------------------------------------
 # compute_prior: average quasi-dispersion using lowess trend
 # ---------------------------------------------------------------------------
@@ -763,3 +853,46 @@ def update_prior(y, mu, design, dispersion, weights, ave_log_cpm):
     prior = compute_prior(ave_log_cpm, out['s2'], out['df'])
 
     return prior
+
+
+def sample_weights(unit_deviance_adj, unit_df_adj, s2=None, iter=10, verbose=False):
+    """Estimate empirical sample weights from adjusted unit deviances.
+
+    Port of edgeR's sampleWeights().
+    """
+    unit_deviance_adj = np.asarray(unit_deviance_adj, dtype=np.float64)
+    unit_df_adj = np.asarray(unit_df_adj, dtype=np.float64)
+
+    if unit_deviance_adj.ndim != 2:
+        raise ValueError("unit_deviance_adj must be a 2D matrix")
+    if unit_df_adj.shape != unit_deviance_adj.shape:
+        raise ValueError("unit_df_adj must have the same shape as unit_deviance_adj")
+
+    nsamples = unit_deviance_adj.shape[1]
+    dfgene = np.sum(unit_df_adj, axis=1)
+    dfsample = np.sum(unit_df_adj, axis=0)
+
+    if s2 is None:
+        w = np.ones(nsamples, dtype=np.float64)
+        for _ in range(int(iter)):
+            with np.errstate(divide='ignore', invalid='ignore'):
+                s2_current = (unit_deviance_adj @ w) / dfgene
+                s2_current = (dfgene * s2_current + np.median(s2_current)) / (dfgene + 1.0)
+                w = np.sum(unit_deviance_adj / s2_current[:, None], axis=0) / dfsample
+                logw = np.log(w)
+                w = np.exp(np.mean(logw) - logw)
+            if verbose:
+                if nsamples > 5:
+                    print("Weights-quantiles", np.quantile(w, [0, 0.25, 0.5, 0.75, 1]))
+                else:
+                    print("Weights", w)
+    else:
+        s2_current = np.asarray(s2, dtype=np.float64)
+        if s2_current.ndim != 1 or s2_current.shape[0] != unit_deviance_adj.shape[0]:
+            raise ValueError("s2 must be a vector with one value per gene")
+        with np.errstate(divide='ignore', invalid='ignore'):
+            w = np.sum(unit_deviance_adj / s2_current[:, None], axis=0) / dfsample
+            logw = np.log(w)
+            w = np.exp(np.mean(logw) - logw)
+
+    return w

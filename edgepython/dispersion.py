@@ -379,12 +379,12 @@ def WLEB(theta, loglik, prior_n=5, covariate=None, trend_method='locfit',
     if covariate is None:
         trend_method = 'none'
 
-    # Set span matching R's WLEB formula exactly
+    # Set span matching edgeR's WLEB.
     if span is None:
-        if ntags <= 50:
-            span = 1.0
+        if legacy_span:
+            span = choose_lowess_span(ntags, small_n=50, min_span=0.25, power=0.5)
         else:
-            span = 0.25 + 0.75 * (50 / ntags) ** 0.5
+            span = choose_lowess_span(ntags)
 
     out = {'span': span}
 

@@ -12,6 +12,11 @@ import numpy as np
 import pandas as pd
 
 
+def _remove_ext(path):
+    base, _ = os.path.splitext(path)
+    return base
+
+
 def read_dge(files, path=None, columns=(0, 1), group=None, labels=None, sep='\t'):
     """Read and collate count data files.
 
@@ -209,44 +214,236 @@ def catch_kallisto(paths, verbose=True):
     return _catch_quant(paths, tool='kallisto', verbose=verbose)
 
 
-def catch_rsem(files, verbose=True):
-    """Read RSEM quantification output.
+def catch_rsem(files=None, path='.', ngibbs=100, dge_list=False, divide=False,
+               verbose=True, DGEList=None):
+    """Read transcript-wise counts and Gibbs posterior summaries from RSEM.
 
-    Parameters
-    ----------
-    files : list of str
-        RSEM output files.
-    verbose : bool
-        Print progress.
-
-    Returns
-    -------
-    dict with counts and annotation.
+    Port of edgeR's catchRSEM().
     """
-    all_data = []
-    gene_ids = None
+    if DGEList is not None:
+        dge_list = bool(DGEList)
 
-    for f in files:
-        df = pd.read_csv(f, sep='\t')
-        if 'expected_count' in df.columns:
-            count_col = 'expected_count'
-        elif 'FPKM' in df.columns:
-            count_col = 'FPKM'
-        else:
-            count_col = df.columns[1]
+    if files is None:
+        files = sorted([f for f in os.listdir(path)
+                        if f.endswith('.isoforms.results')])
+        if not files:
+            raise FileNotFoundError("No isoforms.results files")
+    else:
+        files = [str(f) for f in files]
 
-        if gene_ids is None:
-            gene_ids = df.iloc[:, 0].values
-        all_data.append(df[count_col].values)
+    counts, annotation, ids, overdisp_prior = _read_rsem_data(
+        files, path=path, ngibbs=ngibbs, verbose=verbose)
 
-    counts = np.column_stack(all_data)
-    labels = [os.path.splitext(os.path.basename(f))[0] for f in files]
+    if 'Overdispersion' not in annotation.columns:
+        annotation['Overdispersion'] = np.nan
+        overdisp_prior = np.nan
+
+    if divide:
+        counts = counts / annotation['Overdispersion'].values[:, None]
+
+    resample_type = ['gibbs'] * len(files)
+
+    if dge_list:
+        from .dgelist import make_dgelist
+        sample_names = [_remove_ext(_remove_ext(os.path.join(path, f)))
+                        for f in files]
+        samples = pd.DataFrame(index=sample_names)
+        dge = make_dgelist(counts, samples=samples, genes=annotation)
+        dge['genes'].index = ids
+        dge['samples'].index = sample_names
+        dge['overdispersion.prior'] = overdisp_prior
+        dge['resample.type'] = resample_type
+        dge['divided.counts'] = bool(divide)
+        return dge
 
     return {
         'counts': counts,
-        'annotation': pd.DataFrame({'GeneID': gene_ids}),
-        'samples': pd.DataFrame({'files': files}, index=labels)
+        'annotation': annotation,
+        'overdispersion.prior': overdisp_prior,
+        'resample.type': resample_type,
+        'divided.counts': bool(divide),
     }
+
+
+def _tx_length_annotation(length):
+    length = np.asarray(length, dtype=np.float64)
+    if length.ndim != 2:
+        raise ValueError("length must be a 2D matrix")
+    if np.any(length <= 0) or np.any(~np.isfinite(length)):
+        raise ValueError("length values must be positive and finite")
+
+    log_length = np.log(length)
+    ave_length = np.exp(np.mean(log_length, axis=1))
+    max2min_length = np.exp(np.max(log_length, axis=1) - np.min(log_length, axis=1))
+    return log_length, ave_length, max2min_length
+
+
+def _finalize_tx_dgelist(counts, length, counts_from_abundance, samples=None,
+                         group=None, genes=None, inf_reps=None,
+                         remove_zeros=False, divide=False):
+    from .dgelist import make_dgelist
+
+    count_index = counts.index if isinstance(counts, pd.DataFrame) else None
+    sample_index = counts.columns if isinstance(counts, pd.DataFrame) else None
+    counts = np.asarray(counts, dtype=np.float64)
+    length = np.asarray(length, dtype=np.float64)
+    if counts.ndim != 2:
+        raise ValueError("counts must be a 2D matrix")
+    if length.shape != counts.shape:
+        raise ValueError("length must have the same shape as counts")
+
+    log_length, ave_length, max2min_length = _tx_length_annotation(length)
+    n_genes, n_samples = counts.shape
+
+    if genes is None:
+        genes = pd.DataFrame({'AveLength': ave_length,
+                              'Max2MinLength': max2min_length})
+    else:
+        genes = pd.DataFrame(genes).copy()
+        if len(genes) != n_genes:
+            raise ValueError("nrow(genes) is different from nrow(counts)")
+        genes['AveLength'] = ave_length
+        genes['Max2MinLength'] = max2min_length
+
+    if count_index is not None:
+        genes.index = count_index
+
+    if inf_reps is not None:
+        if len(inf_reps) != n_samples:
+            raise ValueError("inf_reps must contain one matrix per sample")
+        overdisp = np.zeros(n_genes, dtype=np.float64)
+        df_arr = np.zeros(n_genes, dtype=np.int64)
+        for boot in inf_reps:
+            boot = np.asarray(boot, dtype=np.float64)
+            if boot.ndim != 2 or boot.shape[0] != n_genes:
+                raise ValueError("each inf_reps matrix must have shape genes x replicates")
+            _accumulate_overdispersion(boot, overdisp, df_arr)
+        overdisp, _ = _estimate_overdispersion(overdisp, df_arr)
+        genes['Overdispersion'] = overdisp
+
+    if divide:
+        if 'Overdispersion' in genes.columns:
+            counts = counts / genes['Overdispersion'].values[:, None]
+        else:
+            divide = False
+
+    dge = make_dgelist(counts, samples=samples, group=group, genes=genes,
+                       remove_zeros=False)
+    if count_index is not None and 'genes' in dge:
+        dge['genes'].index = count_index
+    if sample_index is not None:
+        dge['samples'].index = sample_index
+
+    dge['divided.counts'] = bool(divide)
+    if counts_from_abundance == 'no':
+        dge['tximport.counts'] = 'raw'
+        dge['offset.prior'] = log_length - np.mean(log_length, axis=1)[:, None]
+    else:
+        dge['tximport.counts'] = counts_from_abundance
+
+    if remove_zeros:
+        keep = np.mean(dge['counts'], axis=1) >= 1e-6
+        if not np.all(keep):
+            dge['counts'] = dge['counts'][keep]
+            if dge.get('genes') is not None:
+                dge['genes'] = dge['genes'].iloc[keep]
+            if dge.get('offset.prior') is not None:
+                dge['offset.prior'] = dge['offset.prior'][keep]
+
+    return dge
+
+
+def dgelist_from_tximport(txi, samples=None, group=None, genes=None,
+                          remove_zeros=False, divide=False):
+    """Create a DGEList from a tximport-like dictionary.
+
+    Parameters broadly follow edgeR::DGEListFromTximport.
+    """
+    required = ('counts', 'length', 'countsFromAbundance')
+    missing = [k for k in required if k not in txi]
+    if missing:
+        raise ValueError(f"Component(s) {','.join(missing)} not found in txi")
+
+    return _finalize_tx_dgelist(
+        counts=txi['counts'],
+        length=txi['length'],
+        counts_from_abundance=txi['countsFromAbundance'],
+        samples=samples,
+        group=group,
+        genes=genes,
+        inf_reps=txi.get('infReps'),
+        remove_zeros=remove_zeros,
+        divide=divide,
+    )
+
+
+def _call_or_attr(obj, *names):
+    for name in names:
+        if isinstance(obj, dict) and name in obj:
+            value = obj[name]
+        elif hasattr(obj, name):
+            value = getattr(obj, name)
+        else:
+            continue
+        return value() if callable(value) else value
+    return None
+
+
+def _tximeta_assays(txm):
+    assays = _call_or_attr(txm, 'assays')
+    if assays is not None:
+        return assays
+    names = _call_or_attr(txm, 'assay_names', 'assayNames')
+    assay_fn = None
+    if not isinstance(txm, dict):
+        assay_fn = getattr(txm, 'assay', None)
+    if names is not None and assay_fn is not None:
+        return {name: assay_fn(name) for name in names}
+    if isinstance(txm, dict):
+        return {k: v for k, v in txm.items()
+                if k not in {'row_data', 'rowData', 'row_ranges', 'rowRanges', 'metadata'}}
+    raise ValueError("txm object must provide assays")
+
+
+def dgelist_from_tximeta(txm, samples=None, group=None,
+                         remove_zeros=False, divide=False):
+    """Create a DGEList from a tximeta/SummarizedExperiment-like object.
+
+    The object may be a dictionary with an ``assays`` mapping, or a lightweight
+    Python object exposing assays plus row metadata and metadata.
+    """
+    assays = _tximeta_assays(txm)
+    if 'counts' not in assays:
+        raise ValueError("txm object doesn't contain counts assay")
+    if 'length' not in assays:
+        raise ValueError("txm object doesn't contain length assay")
+
+    counts = assays['counts']
+    row_data = _call_or_attr(txm, 'row_ranges', 'rowRanges', 'row_data', 'rowData')
+    genes = pd.DataFrame(row_data).copy() if row_data is not None else None
+    if genes is not None and 'gene_id' in genes.columns:
+        genes['gene_id'] = genes['gene_id'].astype(str)
+
+    inf_names = [name for name in assays.keys() if str(name).startswith('infRep')]
+    inf_reps = None
+    if inf_names:
+        inf_array = np.stack([np.asarray(assays[name], dtype=np.float64)
+                              for name in inf_names], axis=2)
+        inf_reps = [inf_array[:, j, :] for j in range(inf_array.shape[1])]
+    metadata = _call_or_attr(txm, 'metadata') or {}
+    counts_from_abundance = metadata.get('countsFromAbundance')
+
+    return _finalize_tx_dgelist(
+        counts=counts,
+        length=assays['length'],
+        counts_from_abundance=counts_from_abundance,
+        samples=samples,
+        group=group,
+        genes=genes,
+        inf_reps=inf_reps,
+        remove_zeros=remove_zeros,
+        divide=divide,
+    )
 
 
 def feature_counts_to_dgelist(files):
@@ -688,6 +885,56 @@ def _read_oarfish(paths, path, verbose):
     return counts, annotation, ids, overdisp_prior
 
 
+def catch_oarfish(prefixes=None, path='.', dge_list=False, divide=False,
+                  verbose=True):
+    """Read transcript-wise counts and inferential samples from Oarfish output.
+
+    Port of edgeR's catchOarfish().
+    """
+    if prefixes is None:
+        quant_files = sorted([f for f in os.listdir(path) if f.endswith('.quant')])
+        if not quant_files:
+            raise FileNotFoundError("No oarfish output files")
+        prefixes = [f[:-6] for f in quant_files]
+    else:
+        prefixes = [str(p) for p in prefixes]
+
+    resolved = []
+    for prefix in prefixes:
+        if prefix.endswith('.quant'):
+            prefix = prefix[:-6]
+        resolved.append(os.path.join(path, prefix))
+
+    counts, annotation, ids, overdisp_prior = _read_oarfish(
+        resolved, path=None, verbose=verbose)
+    if 'Overdispersion' not in annotation.columns:
+        annotation['Overdispersion'] = np.nan
+        overdisp_prior = np.nan
+
+    if divide:
+        counts = counts / annotation['Overdispersion'].values[:, None]
+
+    resample_type = ['bootstrap'] * len(resolved)
+
+    if dge_list:
+        from .dgelist import make_dgelist
+        dge = make_dgelist(counts, genes=annotation)
+        dge['genes'].index = ids
+        dge['samples'].index = resolved
+        dge['overdispersion.prior'] = overdisp_prior
+        dge['resample.type'] = resample_type
+        dge['divided.counts'] = bool(divide)
+        return dge
+
+    return {
+        'counts': counts,
+        'annotation': annotation,
+        'overdispersion.prior': overdisp_prior,
+        'resample.type': resample_type,
+        'divided.counts': bool(divide),
+    }
+
+
 def _read_rsem_data(files, path, ngibbs, verbose):
     """Read RSEM output with Gibbs-based overdispersion.
 
@@ -696,6 +943,10 @@ def _read_rsem_data(files, path, ngibbs, verbose):
     n_samples = len(files)
     if isinstance(ngibbs, (int, float)):
         ngibbs = [int(ngibbs)] * n_samples
+    else:
+        ngibbs = [int(x) for x in ngibbs]
+        if len(ngibbs) < n_samples:
+            ngibbs = [ngibbs[i % len(ngibbs)] for i in range(n_samples)]
 
     counts = None
     overdisp = None
@@ -726,9 +977,14 @@ def _read_rsem_data(files, path, ngibbs, verbose):
             id_col = 'transcript_id' if 'transcript_id' in quant_df.columns else quant_df.columns[0]
             ids = quant_df[id_col].values.astype(str)
             lengths = quant_df['length'].values.astype(np.int64) if 'length' in quant_df.columns else None
-            eff_lengths = quant_df['effective_length'].values.astype(np.float64) if 'effective_length' in quant_df.columns else None
+            eff_lengths = np.zeros((n_tx, n_samples), dtype=np.float64)
+
+        if len(quant_df) != len(ids):
+            raise ValueError("RSEM files contain different numbers of rows")
 
         counts[:, j] = quant_df['expected_count'].values.astype(np.float64)
+        if 'effective_length' in quant_df.columns:
+            eff_lengths[:, j] = quant_df['effective_length'].values.astype(np.float64)
 
         # RSEM Gibbs overdispersion: (ngibbs-1) * S^2 / M
         M_col = quant_df.get('posterior_mean_count')
@@ -744,8 +1000,11 @@ def _read_rsem_data(files, path, ngibbs, verbose):
     ann_dict = {}
     if lengths is not None:
         ann_dict['Length'] = lengths
-    if eff_lengths is not None:
-        ann_dict['EffectiveLength'] = eff_lengths
+    if eff_lengths is not None and np.any(eff_lengths):
+        log_length, ave_length, max2min_length = _tx_length_annotation(
+            np.maximum(eff_lengths, 1e-8))
+        ann_dict['AveLength'] = ave_length
+        ann_dict['Max2MinLength'] = max2min_length
     if has_bootstraps:
         overdisp_final, overdisp_prior = _estimate_overdispersion(overdisp, df_arr)
         ann_dict['Overdispersion'] = overdisp_final

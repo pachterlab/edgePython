@@ -145,3 +145,20 @@ class TestWLEB:
         assert 'overall' in result
         assert result['trend'].shape == (ntags,)
         assert result['individual'].shape == (ntags,)
+
+    def test_wleb_default_and_legacy_span(self):
+        theta_grid = np.linspace(-2, 2, 21)
+        ntags = 200
+        loglik = -0.5 * (theta_grid[None, :] - np.linspace(-1, 1, ntags)[:, None]) ** 2
+        covariate = np.linspace(0, 10, ntags)
+
+        default = ep.WLEB(theta_grid, loglik, covariate=covariate,
+                          trend_method='movingave')
+        legacy = ep.WLEB(theta_grid, loglik, covariate=covariate,
+                         trend_method='movingave', legacy_span=True)
+
+        expected_default = min(0.2 + 0.8 * (25 / ntags) ** (1 / 3), 1.0)
+        expected_legacy = min(0.25 + 0.75 * (50 / ntags) ** 0.5, 1.0)
+        assert np.isclose(default['span'], expected_default)
+        assert np.isclose(legacy['span'], expected_legacy)
+        assert default['span'] != legacy['span']

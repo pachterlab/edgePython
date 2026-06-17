@@ -465,11 +465,6 @@ def glm_ql_fit(y, design=None, dispersion=None, offset=None, lib_size=None,
                     dispersion = dge.get('common.dispersion')
                 if dispersion is None:
                     raise ValueError("No dispersion values found in DGEList object.")
-            else:
-                if dge.get('trended.dispersion') is not None:
-                    ntop = int(np.ceil(0.1 * dge['counts'].shape[0]))
-                    i = np.argsort(dge['AveLogCPM'])[::-1][:ntop]
-                    dispersion = np.mean(dge['trended.dispersion'][i])
 
         from .dgelist import get_offset
         offset = get_offset(dge)
@@ -568,7 +563,7 @@ def glm_ql_fit(y, design=None, dispersion=None, offset=None, lib_size=None,
         s2[df_residual == 0] = 0
     else:
         # New-style: adjusted deviance and df using QL weights (matching R's C code)
-        from .ql_weights import update_prior, compute_adjust_vec
+        from .ql_weights import update_prior, compute_adjust_vec, compute_adjust_mat
 
         # Expand dispersion to matrix form for ql_weights
         disp_arr = np.atleast_1d(np.asarray(dispersion, dtype=np.float64))
@@ -591,6 +586,12 @@ def glm_ql_fit(y, design=None, dispersion=None, offset=None, lib_size=None,
         fit['df.residual.adj'] = df_residual
         fit['deviance.adj'] = out['deviance']
         fit['average.ql.dispersion'] = ave_ql_disp
+        if keep_unit_mat:
+            out_mat = compute_adjust_mat(y_mat, fit['fitted.values'], design,
+                                         disp_arr, ave_ql_disp, weights)
+            fit['leverage'] = out_mat['leverage']
+            fit['unit.deviance.adj'] = out_mat['unit.deviance']
+            fit['unit.df.adj'] = out_mat['unit.df']
 
     # Empirical Bayes moderation
     s2 = np.maximum(s2, 0)

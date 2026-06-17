@@ -68,6 +68,31 @@ def calc_norm_factors(counts, lib_size=None, method='TMM', ref_column=None,
 norm_lib_sizes = calc_norm_factors
 
 
+def normalize_between_arrays_dgelist(object, method="cyclicloess", **kwargs):
+    """Apply between-array normalization to a DGEList via its offset matrix.
+
+    Port of edgeR's normalizeBetweenArrays.DGEList().
+    """
+    if not (isinstance(object, dict) and 'counts' in object):
+        raise ValueError("object must be a DGEList-like object with counts")
+
+    method = (method or "cyclicloess").lower()
+    valid_methods = ("none", "scale", "quantile", "cyclicloess")
+    if method not in valid_methods:
+        raise ValueError(f"method must be one of {valid_methods}")
+
+    from .expression import cpm
+    from .voom_lmfit import _normalize_between_arrays
+
+    log_cpm_raw = cpm(object, log=True)
+    log_cpm_norm = _normalize_between_arrays(log_cpm_raw, method=method, **kwargs)
+
+    lib_size = np.asarray(object['samples']['lib.size'].values, dtype=np.float64)
+    object['offset'] = np.tile(np.log(lib_size), (object['counts'].shape[0], 1))
+    object['offset'] = object['offset'] + (log_cpm_raw - log_cpm_norm) * np.log(2.0)
+    return object
+
+
 def _calc_norm_factors_default(x, lib_size=None, method='TMM', ref_column=None,
                                logratio_trim=0.3, sum_trim=0.05, do_weighting=True,
                                a_cutoff=-1e10, p=0.75):

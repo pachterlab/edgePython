@@ -24,7 +24,12 @@ from .dgelist import (
 )
 
 # --- Normalization ---
-from .normalization import calc_norm_factors, normalize_chip_to_input, calc_norm_offsets_for_chip
+from .normalization import (
+    calc_norm_factors,
+    normalize_between_arrays_dgelist,
+    normalize_chip_to_input,
+    calc_norm_offsets_for_chip,
+)
 
 # --- Expression ---
 from .expression import cpm, rpkm, tpm, ave_log_cpm, cpm_by_group, rpkm_by_group
@@ -72,6 +77,9 @@ from .io import (
     catch_salmon,
     catch_kallisto,
     catch_rsem,
+    catch_oarfish,
+    dgelist_from_tximport,
+    dgelist_from_tximeta,
     feature_counts_to_dgelist,
     read_bismark2dge,
     seurat_to_pb,
@@ -113,6 +121,9 @@ from .sc_fit import glm_sc_fit, glm_sc_test, shrink_sc_disp
 
 # --- limma utilities ---
 from .limma_port import squeeze_var
+
+# --- QL diagnostics ---
+from .ql_weights import sample_weights
 
 # --- voom ---
 from .voom_lmfit import (

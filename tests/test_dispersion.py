@@ -238,6 +238,60 @@ class TestGlmQLFitDispersion:
         assert abs(np.min(s2p) - 0.3227) < 0.05
         assert abs(np.median(s2p) - 1.0467) < 0.05
         assert abs(np.max(s2p) - 3.2255) < 0.1
+        assert fit['leverage'].shape == y.shape
+        assert fit['unit.deviance.adj'].shape == y.shape
+        assert fit['unit.df.adj'].shape == y.shape
+        assert np.allclose(fit['unit.deviance.adj'].sum(axis=1),
+                           fit['deviance.adj'])
+        assert np.allclose(fit['unit.df.adj'].sum(axis=1),
+                           fit['df.residual.adj'])
+        assert np.all((fit['leverage'] >= -1e-10) & (fit['leverage'] <= 1 + 1e-8))
+
+    def test_ql_unit_deviance_respects_observation_weights(self, part4_data):
+        d, y, group, design = part4_data
+        weights = np.ones_like(y, dtype=float)
+        weights[:] = np.array([0.5, 1.0, 2.0])
+        fit = ep.glm_ql_fit(y, design=design, weights=weights, legacy=False,
+                            keep_unit_mat=True)
+
+        assert np.allclose((fit['unit.deviance.adj'] * weights).sum(axis=1),
+                           fit['deviance.adj'])
+        assert np.allclose(fit['unit.df.adj'].sum(axis=1),
+                           fit['df.residual.adj'])
+
+    def test_sample_weights_with_supplied_s2(self):
+        unit_dev = np.array([
+            [2.0, 4.0, 8.0],
+            [1.0, 3.0, 9.0],
+            [5.0, 2.0, 1.0],
+        ])
+        unit_df = np.ones_like(unit_dev)
+        s2 = np.array([2.0, 1.0, 5.0])
+
+        observed = ep.sample_weights(unit_dev, unit_df, s2=s2)
+        raw = np.sum(unit_dev / s2[:, None], axis=0) / np.sum(unit_df, axis=0)
+        expected = np.exp(np.mean(np.log(raw)) - np.log(raw))
+
+        assert np.allclose(observed, expected)
+        assert np.isclose(np.prod(observed), 1.0)
+
+    def test_sample_weights_from_glm_ql_fit_unit_matrices(self):
+        rng = np.random.RandomState(123)
+        y = rng.poisson(15, size=(80, 6)).astype(float)
+        y[:10, 3:] += rng.poisson(10, size=(10, 3))
+        group = np.array([1, 1, 1, 2, 2, 2])
+        design = np.column_stack([np.ones(6), np.array([0, 0, 0, 1, 1, 1])])
+        d = ep.make_dgelist(y, group=group)
+        fit = ep.glm_ql_fit(d, design=design, legacy=False,
+                             keep_unit_mat=True)
+
+        weights = ep.sample_weights(fit['unit.deviance.adj'],
+                                    fit['unit.df.adj'])
+
+        assert weights.shape == (y.shape[1],)
+        assert np.all(np.isfinite(weights))
+        assert np.all(weights > 0)
+        assert np.isclose(np.prod(weights), 1.0)
 
     def test_legacy_false(self, part4_data):
         d, y, group, design = part4_data
@@ -250,15 +304,28 @@ class TestGlmQLFitDispersion:
         assert abs(np.median(s2p) - 1.0289) < 0.05
         assert abs(np.max(s2p) - 3.1867) < 0.15
 
+    def test_legacy_false_ignores_stored_dgelist_dispersions(self, part4_data):
+        d, y, group, design = part4_data
+        baseline_dge = ep.make_dgelist(counts=y, group=group)
+        baseline = ep.glm_ql_fit(baseline_dge, design=design, legacy=False)
+
+        poisoned = ep.make_dgelist(counts=y, group=group)
+        poisoned['trended.dispersion'] = np.full(y.shape[0], 999.0)
+        poisoned['tagwise.dispersion'] = np.full(y.shape[0], 999.0)
+        fit = ep.glm_ql_fit(poisoned, design=design, legacy=False)
+
+        assert np.allclose(fit['dispersion'], baseline['dispersion'])
+        assert np.allclose(fit['s2.post'], baseline['s2.post'])
+
     def test_legacy_true(self, part4_data):
         d, y, group, design = part4_data
         d2 = ep.estimate_disp(d, design=design)
         fit = ep.glm_ql_fit(d2, design=design, legacy=True)
-        # R: dispersion: Min=0.1958, Median=0.2098, Max=0.2685
+        # R edgeR >= 4.8 default span: Min=0.1834, Median=0.1997, Max=0.2799
         disp = np.asarray(fit['dispersion'])
-        assert abs(np.min(disp) - 0.1958) < 0.01
-        assert abs(np.median(disp) - 0.2098) < 0.01
-        assert abs(np.max(disp) - 0.2685) < 0.02
+        assert abs(np.min(disp) - 0.1834) < 0.01
+        assert abs(np.median(disp) - 0.1997) < 0.01
+        assert abs(np.max(disp) - 0.2799) < 0.02
         # R: s2.post: Min=0.0618, Median=0.7988, Max=2.5983
         s2p = fit['s2.post']
         assert abs(np.min(s2p) - 0.0618) < 0.02

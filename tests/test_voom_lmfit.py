@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from edgepython.voom_lmfit import (
     voom_basic,
@@ -98,6 +99,75 @@ def test_voom_lmfit_structural_zero_branch():
     assert out["df_residual"].shape == (n_genes,)
     assert out["sigma"].shape == (n_genes,)
     assert np.sum(np.isfinite(out["sigma"])) >= n_genes - 2
+
+
+def test_voom_lmfit_uses_adaptive_span_by_default():
+    rng = np.random.default_rng(913)
+    counts = rng.poisson(lam=20, size=(1000, 6)).astype(float)
+    design = np.column_stack([np.ones(6), np.array([0, 0, 0, 1, 1, 1])])
+
+    out_default = voom_lmfit(counts, design=design, keep_elist=False)
+    out_fixed = voom_lmfit(counts, design=design, keep_elist=False,
+                           adaptive_span=False)
+
+    expected = min(0.3 + 0.7 * (50 / counts.shape[0]) ** (1 / 3), 1.0)
+    assert np.isclose(out_default["span"], expected)
+    assert np.isclose(out_fixed["span"], 0.5)
+    assert not np.isclose(out_default["span"], out_fixed["span"])
+
+
+def test_voom_lmfit_offset_prior_adjusts_logcpm():
+    rng = np.random.default_rng(314)
+    counts = rng.poisson(lam=30, size=(60, 4)).astype(float)
+    design = np.ones((4, 1))
+    lib_size = counts.sum(axis=0)
+    offset_prior = np.zeros_like(counts)
+    offset_prior[:30, 0] = 0.4
+    offset_prior[:30, 1] = -0.4
+
+    out = voom_lmfit(
+        counts,
+        design=design,
+        lib_size=lib_size,
+        offset_prior=offset_prior,
+        adaptive_span=False,
+        keep_elist=False,
+    )
+
+    lib_size_matrix = np.exp(np.log(lib_size)[None, :] + offset_prior)
+    expected_e = np.log2((counts + 0.5) / (lib_size_matrix + 1.0) * 1e6)
+    assert np.allclose(out["E"], expected_e)
+    assert np.allclose(out["lib_size_matrix"], lib_size_matrix)
+    assert np.allclose(out["offset_prior"], offset_prior)
+
+
+def test_voom_lmfit_offset_is_centered_to_offset_prior():
+    rng = np.random.default_rng(2718)
+    counts = rng.poisson(lam=20, size=(40, 4)).astype(float)
+    design = np.ones((4, 1))
+    raw_offset = np.log(counts.sum(axis=0))[None, :] + rng.normal(0, 0.1, size=counts.shape)
+
+    out = voom_lmfit(
+        counts,
+        design=design,
+        offset=raw_offset,
+        adaptive_span=False,
+        keep_elist=False,
+    )
+
+    expected_prior = raw_offset - raw_offset.mean(axis=1, keepdims=True)
+    assert np.allclose(out["offset_prior"], expected_prior)
+
+    with pytest.warns(UserWarning, match="Ignoring offset"):
+        out_both = voom_lmfit(
+            counts,
+            design=design,
+            offset=raw_offset,
+            offset_prior=np.zeros_like(counts),
+            adaptive_span=False,
+            keep_elist=False,
+        )
+    assert np.allclose(out_both["offset_prior"], 0.0)
 
 
 def test_array_weights_respects_var_design():

@@ -78,6 +78,35 @@ class TestNormalization:
         expected = [37600.96, 100442.9, 49794.01, 26701.04]
         assert np.allclose(cpm_rle[2], expected, rtol=0.001)
 
+    def test_normalize_between_arrays_dgelist_scale_sets_offset(self):
+        y = pd.read_csv(f"{CSV_DIR}/test_data_part1.csv").values
+        d = ep.make_dgelist(counts=y, group=np.array([1, 1, 2, 2]))
+        raw = ep.cpm(d, log=True)
+
+        out = ep.normalize_between_arrays_dgelist(d, method='scale')
+
+        med = np.nanmedian(raw, axis=0)
+        normed = raw - med[None, :] + np.nanmedian(med)
+        expected_offset = np.tile(
+            np.log(out['samples']['lib.size'].values),
+            (out['counts'].shape[0], 1),
+        )
+        expected_offset = expected_offset + (raw - normed) * np.log(2.0)
+
+        assert out is d
+        assert out['offset'].shape == y.shape
+        assert np.allclose(out['offset'], expected_offset)
+
+    def test_normalize_between_arrays_dgelist_quantile_aligns_logcpm(self):
+        y = pd.read_csv(f"{CSV_DIR}/test_data_part1.csv").values
+        d = ep.make_dgelist(counts=y, group=np.array([1, 1, 2, 2]))
+
+        out = ep.normalize_between_arrays_dgelist(d, method='quantile')
+        normed = ep.cpm(out, log=True)
+
+        sorted_cols = np.sort(normed, axis=0)
+        assert np.max(np.abs(sorted_cols[:, 0] - sorted_cols[:, 1])) < 0.25
+
 
 # ── cbind / rbind ────────────────────────────────────────────────────
 
