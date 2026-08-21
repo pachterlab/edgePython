@@ -339,49 +339,69 @@ def _camera_default(y, index, design, contrast, weights=None,
         meanStat = np.mean(Stat)
         varStat = np.var(Stat, ddof=1)
 
-    results = []
-    for s_idx in range(nsets):
-        idx = np.asarray(set_indices[s_idx], dtype=int)
-        StatInSet = Stat[idx]
-        m = len(StatInSet)
-        m2 = G - m
+    if use_ranks:
+        results = []
+        for s_idx in range(nsets):
+            idx = np.asarray(set_indices[s_idx], dtype=int)
+            m = len(idx)
 
-        if fixed_cor:
-            correlation = inter_gene_cor
-            vif = 1 + (m - 1) * correlation
-        else:
-            if m > 1:
+            if fixed_cor:
+                correlation = inter_gene_cor
+            elif m > 1:
                 Uset = U_norm[idx, :]
                 vif = m * np.mean(np.mean(Uset, axis=0) ** 2)
                 correlation = (vif - 1) / (m - 1)
             else:
-                vif = 1
                 correlation = np.nan
 
-        if use_ranks:
             if not allow_neg_cor:
                 correlation = max(0, correlation)
             p_down, p_up = _rank_sum_test_with_correlation(
                 idx, Stat, correlation, df_camera)
-        else:
+
+            p_two = 2 * min(p_down, p_up)
+            direction = 'Up' if p_up < p_down else 'Down'
+            results.append({'NGenes': m, 'Direction': direction, 'PValue': p_two})
+    else:
+        # t_dist.cdf/sf are evaluated once below on the full array of
+        # two-sample t-statistics instead of once per set: df_camera is
+        # the same for every set, so batching avoids nsets pairs of
+        # per-call scipy dispatch overhead.
+        ngenes_arr = np.empty(nsets, dtype=int)
+        two_sample_t = np.empty(nsets)
+        for s_idx in range(nsets):
+            idx = np.asarray(set_indices[s_idx], dtype=int)
+            StatInSet = Stat[idx]
+            m = len(StatInSet)
+            m2 = G - m
+            ngenes_arr[s_idx] = m
+
+            if fixed_cor:
+                vif = 1 + (m - 1) * inter_gene_cor
+            elif m > 1:
+                Uset = U_norm[idx, :]
+                vif = m * np.mean(np.mean(Uset, axis=0) ** 2)
+            else:
+                vif = 1
             if not allow_neg_cor:
                 vif = max(1.0, vif)
+
             meanStatInSet = np.mean(StatInSet)
             delta = G / m2 * (meanStatInSet - meanStat)
             varStatPooled = ((G - 1) * varStat - delta ** 2 * m * m2 / G) / (G - 2)
             varStatPooled = max(varStatPooled, 1e-15)
-            two_sample_t = delta / np.sqrt(varStatPooled * (vif / m + 1.0 / m2))
-            p_down = t_dist.cdf(two_sample_t, df_camera)
-            p_up = t_dist.sf(two_sample_t, df_camera)
+            two_sample_t[s_idx] = delta / np.sqrt(varStatPooled * (vif / m + 1.0 / m2))
 
-        p_two = 2 * min(p_down, p_up)
-        direction = 'Up' if p_up < p_down else 'Down'
+        p_down_arr = t_dist.cdf(two_sample_t, df_camera)
+        p_up_arr = t_dist.sf(two_sample_t, df_camera)
+        p_two_arr = 2 * np.minimum(p_down_arr, p_up_arr)
+        direction_arr = np.where(p_up_arr < p_down_arr, 'Up', 'Down')
 
-        results.append({
-            'NGenes': m,
-            'Direction': direction,
-            'PValue': p_two
-        })
+        results = [
+            {'NGenes': int(ngenes_arr[s_idx]), 'Direction': direction_arr[s_idx],
+             'PValue': float(p_two_arr[s_idx])}
+            for s_idx in range(nsets)
+        ]
 
     df = pd.DataFrame(results, index=set_names)
     if nsets > 1:

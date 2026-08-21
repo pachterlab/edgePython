@@ -511,6 +511,8 @@ def zscore_nbinom(q, size, mu, method='midp'):
 
     Port of edgeR's zscoreNBinom.
     """
+    from .limma_port import logsumexp
+
     q = np.asarray(q, dtype=np.float64)
     size = np.atleast_1d(np.asarray(size, dtype=np.float64))
     mu = np.atleast_1d(np.asarray(mu, dtype=np.float64))
@@ -521,27 +523,40 @@ def zscore_nbinom(q, size, mu, method='midp'):
     z = np.zeros(n)
     qr = np.round(q).astype(int)
 
-    for i in range(n):
-        if mu[i] <= 0 or size[i] <= 0:
-            z[i] = 0
-            continue
-        logd = stats.nbinom.logpmf(qr[i], size[i], size[i] / (size[i] + mu[i]))
-        if qr[i] == 0:
-            w = (q[i] - qr[i]) + 0.5
-            logp = logd + np.log(max(w, 1e-300))
-            z[i] = stats.norm.ppf(np.exp(logp)) if np.exp(logp) < 1 else 0
-        elif q[i] >= mu[i]:
-            logp_tail = stats.nbinom.logsf(qr[i], size[i], size[i] / (size[i] + mu[i]))
-            w = 0.5 - (q[i] - qr[i])
-            from .limma_port import logsumexp
-            logp = logsumexp(logp_tail, logd + np.log(max(w, 1e-300)))
-            z[i] = -stats.norm.ppf(np.exp(logp)) if np.exp(logp) < 1 else 0
-        else:
-            logp_tail = stats.nbinom.logcdf(max(qr[i] - 1, 0), size[i], size[i] / (size[i] + mu[i]))
-            w = (q[i] - qr[i]) + 0.5
-            from .limma_port import logsumexp
-            logp = logsumexp(logp_tail, logd + np.log(max(w, 1e-300)))
-            z[i] = stats.norm.ppf(np.exp(logp)) if np.exp(logp) < 1 else 0
+    valid = (mu > 0) & (size > 0)
+    if not np.any(valid):
+        return z
+
+    p = np.zeros(n)
+    p[valid] = size[valid] / (size[valid] + mu[valid])
+
+    logd = np.zeros(n)
+    logd[valid] = stats.nbinom.logpmf(qr[valid], size[valid], p[valid])
+
+    zero_mask = valid & (qr == 0)
+    upper_mask = valid & (qr != 0) & (q >= mu)
+    lower_mask = valid & (qr != 0) & (q < mu)
+
+    if np.any(zero_mask):
+        w = np.maximum((q[zero_mask] - qr[zero_mask]) + 0.5, 1e-300)
+        logp = logd[zero_mask] + np.log(w)
+        prob = np.exp(logp)
+        z[zero_mask] = np.where(prob < 1, stats.norm.ppf(prob), 0.0)
+
+    if np.any(upper_mask):
+        logp_tail = stats.nbinom.logsf(qr[upper_mask], size[upper_mask], p[upper_mask])
+        w = np.maximum(0.5 - (q[upper_mask] - qr[upper_mask]), 1e-300)
+        logp = logsumexp(logp_tail, logd[upper_mask] + np.log(w))
+        prob = np.exp(logp)
+        z[upper_mask] = np.where(prob < 1, -stats.norm.ppf(prob), 0.0)
+
+    if np.any(lower_mask):
+        qm1 = np.maximum(qr[lower_mask] - 1, 0)
+        logp_tail = stats.nbinom.logcdf(qm1, size[lower_mask], p[lower_mask])
+        w = np.maximum((q[lower_mask] - qr[lower_mask]) + 0.5, 1e-300)
+        logp = logsumexp(logp_tail, logd[lower_mask] + np.log(w))
+        prob = np.exp(logp)
+        z[lower_mask] = np.where(prob < 1, stats.norm.ppf(prob), 0.0)
 
     return z
 
