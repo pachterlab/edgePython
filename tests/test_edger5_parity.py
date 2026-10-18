@@ -534,3 +534,106 @@ def test_cbind_and_rbind_keep_offset_prior():
     np.testing.assert_array_equal(both["offset.prior"], dge["offset.prior"])
     both = rbind_dgelist(dge[:100], dge[100:])
     np.testing.assert_array_equal(both["offset.prior"], dge["offset.prior"])
+
+
+# limma 3.99: voom, voomLmFit, arrayWeights, duplicateCorrelation, camera, fry
+
+BIG = _as_array(INPUTS["big_counts"])
+GROUP = np.repeat(["A", "B", "C"], 3)
+ADDITIVE = _as_array(INPUTS["additive"])
+ONEWAY = _as_array(INPUTS["oneway"])
+SETS = {k: np.atleast_1d(np.asarray(v, dtype=int)) - 1 for k, v in INPUTS["sets"].items()}
+
+
+def _big_dgelist():
+    return ep.calc_norm_factors(ep.make_dgelist(BIG, group=GROUP))
+
+
+@pytest.fixture(scope="module")
+def big_voom():
+    return ep.voom(_big_dgelist(), ADDITIVE)
+
+
+def test_voom_matches_limma(big_voom):
+    _assert_close(big_voom["E"][:200], _edger("voom", "E"), rtol=1e-12)
+    _assert_close(big_voom["weights"][:200], _edger("voom", "weights"), rtol=1e-8)
+    assert big_voom["span"] == pytest.approx(_edger("voom", "span")[0], rel=1e-14)
+    _assert_close(ep.voom(_big_dgelist(), ADDITIVE, adaptive_span=False)["weights"][:200],
+                  _edger("voom_fixed_span"), rtol=1e-8)
+    _assert_close(ep.voom(_offset_prior_dgelist(), ADDITIVE)["weights"],
+                  _edger("voom_offset_prior"), rtol=1e-8)
+
+
+@pytest.mark.parametrize("case, kwargs", [
+    ("voomlmfit", {}),
+    ("voomlmfit_sw", {"sample_weights": True}),
+    ("voomlmfit_block", {"design": ONEWAY, "block": _as_array(INPUTS["block"])}),
+    ("voomlmfit_zeros", {}),
+])
+def test_voom_lmfit_matches_limma(case, kwargs):
+    dge = _big_dgelist()
+    if case == "voomlmfit_zeros":
+        # Structural zeros: an all-zero group in the first 20 genes
+        dge["counts"] = dge["counts"].copy()
+        dge["counts"][:20, 6:] = 0
+    kwargs = {"design": ADDITIVE, **kwargs}
+    fit = ep.voom_lmfit(dge, **kwargs)
+    _assert_close(fit["coefficients"][:200], _edger(case, "coefficients"), rtol=1e-8, atol=1e-10)
+    _assert_close(fit["sigma"][:200], _edger(case, "sigma"), rtol=1e-8)
+    _assert_close(fit["df_residual"], _edger(case, "df_residual"), rtol=1e-12)
+    _assert_close(fit["stdev_unscaled"][:200], _edger(case, "stdev_unscaled"), rtol=1e-8)
+
+
+def test_array_weights_and_duplicate_correlation_match_limma(big_voom):
+    _assert_close(ep.array_weights(big_voom["E"], ADDITIVE, weights=big_voom["weights"]),
+                  _edger("array_weights"), rtol=1e-9)
+    v = ep.voom(_big_dgelist(), ONEWAY)
+    dc = ep.duplicate_correlation(v["E"], ONEWAY, np.tile([1, 2, 3], 3), weights=v["weights"])
+    assert dc["consensus_correlation"] == pytest.approx(_edger("duplicate_correlation")[0], rel=1e-8)
+
+
+def _assert_gene_set_table(tab, case, names=None):
+    names = list(SETS) if names is None else names
+    expected = EDGER[case]
+    for col, values in expected.items():
+        actual = tab.loc[names, col]
+        if col == "Direction":
+            np.testing.assert_array_equal((actual == "Up").astype(int), values)
+        else:
+            _assert_close(actual.to_numpy(float), _as_array(values), rtol=1e-8, atol=1e-15)
+
+
+def _weighted_sets():
+    import pandas as pd
+    return {"w1": pd.DataFrame({"id": np.arange(40), "w": _as_array(INPUTS["set_weights"])})}
+
+
+CAMERA_CASES = {
+    "camera": lambda v: ep.camera(v, SETS, ADDITIVE),
+    "camera_array_weights": lambda v: ep.camera(v["E"], SETS, ADDITIVE, weights=_as_array(INPUTS["array_w"])),
+    "camera_correlation": lambda v: ep.camera(v, SETS, ADDITIVE, inter_gene_cor=None),
+    "camera_ranks": lambda v: ep.camera(v, SETS, ADDITIVE, use_ranks=True),
+    "camera_nondirectional": lambda v: ep.camera(v, SETS, ADDITIVE, directional=False),
+    "camera_contrast": lambda v: ep.camera(v, SETS, ADDITIVE, contrast=np.array([0, 1, -1, 0, 0])),
+    "camera_weighted_set": lambda v: ep.camera(v, _weighted_sets(), ADDITIVE, inter_gene_cor=None),
+    "camera_dgelist": lambda v: ep.camera(ep.estimate_disp(_big_dgelist(), ADDITIVE), SETS, ADDITIVE),
+    "fry": lambda v: ep.fry(v, SETS, ADDITIVE),
+    "fry_none": lambda v: ep.fry(v, SETS, ADDITIVE, standardize="none"),
+    "fry_residual.sd": lambda v: ep.fry(v, SETS, ADDITIVE, standardize="residual.sd"),
+    "fry_p2": lambda v: ep.fry(v, SETS, ADDITIVE, standardize="p2"),
+    "fry_robust": lambda v: ep.fry(v, SETS, ADDITIVE, robust=True),
+    "fry_trend": lambda v: ep.fry(v["E"], SETS, ADDITIVE, trend_var=True),
+    "fry_array_weights": lambda v: ep.fry(v["E"], SETS, ADDITIVE, array_weights=_as_array(INPUTS["array_w"])),
+    "fry_gene_weights": lambda v: ep.fry(v["E"], SETS, ADDITIVE, gene_weights=np.linspace(0.5, 2, 2000)),
+    "fry_contrast": lambda v: ep.fry(v, SETS, ADDITIVE, contrast=np.array([0, 1, -1, 0, 0])),
+    "fry_block": lambda v: ep.fry(v, SETS, ONEWAY, block=_as_array(INPUTS["block"]), correlation=0.3),
+    "fry_weighted_set": lambda v: ep.fry(v, _weighted_sets(), ADDITIVE),
+    "fry_dgelist": lambda v: ep.fry(ep.estimate_disp(_big_dgelist()), SETS),
+}
+
+
+@pytest.mark.filterwarnings("ignore")
+@pytest.mark.parametrize("case", list(CAMERA_CASES))
+def test_camera_and_fry_match_limma(big_voom, case):
+    names = ["w1"] if "weighted_set" in case else None
+    _assert_gene_set_table(CAMERA_CASES[case](big_voom), case, names)

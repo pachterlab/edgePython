@@ -2,7 +2,7 @@
 # Run from tests/data:  Rscript edger5_parity.R
 # Values in the file come from R 4.5.2, edgeR 4.99.8 (Bioconductor devel,
 # released as edgeR 5.0.0) and limma 3.99.2.
-suppressMessages({library(edgeR); library(jsonlite)})
+suppressMessages({library(edgeR); library(limma); library(jsonlite)})
 set.seed(20261017)
 inputs <- list()
 out <- list()
@@ -272,6 +272,55 @@ out$disp_cox_reid <- c(oneway = dispCoxReid(counts, inputs$oneway, offset = offs
                        additive = dispCoxReid(counts, inputs$additive, offset = offset))
 out$apl <- adjustedProfileLik(0.1, counts, inputs$additive, offset = matrix(offset, ngenes, nlibs, byrow = TRUE))
 out$apl_oneway <- adjustedProfileLik(0.1, counts, inputs$oneway, offset = matrix(offset, ngenes, nlibs, byrow = TRUE))
+
+# limma 3.99: voom (adaptive span by default), voomLmFit, arrayWeights,
+# duplicateCorrelation, camera and fry, on the 2000-gene counts. Gene-by-sample
+# matrices keep their first 200 genes.
+top <- function(m) m[1:200, , drop = FALSE]
+v <- voom(dgebig, inputs$additive)
+out$voom <- list(E = top(v$E), weights = top(v$weights), span = v$span)
+out$voom_fixed_span <- top(voom(dgebig, inputs$additive, adaptive.span = FALSE)$weights)
+out$voom_offset_prior <- voom(dgeop, inputs$additive)$weights
+lmfit_values <- function(fit) list(coefficients = top(fit$coefficients), sigma = fit$sigma[1:200],
+  df_residual = fit$df.residual, stdev_unscaled = top(fit$stdev.unscaled))
+out$voomlmfit <- lmfit_values(voomLmFit(dgebig, inputs$additive))
+out$voomlmfit_sw <- lmfit_values(voomLmFit(dgebig, inputs$additive, sample.weights = TRUE))
+inputs$block <- rep(1:3, each = 3)
+oneway <- inputs$oneway
+out$voomlmfit_block <- lmfit_values(voomLmFit(dgebig, oneway, block = inputs$block))
+dgez <- dgebig; dgez$counts[1:20, group == "C"] <- 0
+out$voomlmfit_zeros <- lmfit_values(voomLmFit(dgez, inputs$additive))
+out$array_weights <- arrayWeights(v, inputs$additive)
+out$duplicate_correlation <- duplicateCorrelation(voom(dgebig, oneway), oneway, block = rep(1:3, 3))$consensus.correlation
+set.seed(1)
+inputs$sets <- list(s1 = 1:40, s2 = 101:160, s3 = sample(2000, 80), s4 = 7L)
+inputs$set_weights <- seq(-1, 1, length.out = 40)
+inputs$array_w <- c(1, 0.5, 2, 1.5, 1, 0.8, 1.2, 0.7, 1.1)
+wsets <- list(w1 = data.frame(id = 1:40, w = inputs$set_weights))
+gs_values <- function(tab, sets = inputs$sets) {
+  tab <- tab[names(sets), ]
+  tab$Direction <- if (is.null(tab$Direction)) NULL else as.integer(tab$Direction == "Up")
+  as.list(tab)
+}
+out$camera <- gs_values(camera(v, inputs$sets, inputs$additive))
+out$camera_array_weights <- gs_values(camera(v$E, inputs$sets, inputs$additive, weights = inputs$array_w))
+out$camera_correlation <- gs_values(camera(v, inputs$sets, inputs$additive, inter.gene.cor = NA))
+out$camera_ranks <- gs_values(camera(v, inputs$sets, inputs$additive, use.ranks = TRUE))
+out$camera_nondirectional <- gs_values(suppressWarnings(camera(v, inputs$sets, inputs$additive, directional = FALSE)))
+out$camera_contrast <- gs_values(camera(v, inputs$sets, inputs$additive, contrast = c(0, 1, -1, 0, 0)))
+out$camera_weighted_set <- gs_values(camera(v, wsets, inputs$additive, inter.gene.cor = NA), wsets)
+out$camera_dgelist <- gs_values(camera(estimateDisp(dgebig, inputs$additive), inputs$sets, inputs$additive))
+out$fry <- gs_values(fry(v, inputs$sets, inputs$additive))
+for (s in c("none", "residual.sd", "p2"))
+  out[[paste0("fry_", s)]] <- gs_values(fry(v, inputs$sets, inputs$additive, standardize = s))
+out$fry_robust <- gs_values(fry(v, inputs$sets, inputs$additive, robust = TRUE))
+out$fry_trend <- gs_values(fry(v$E, inputs$sets, inputs$additive, trend.var = TRUE))
+out$fry_array_weights <- gs_values(fry(v$E, inputs$sets, inputs$additive, array.weights = inputs$array_w))
+out$fry_gene_weights <- gs_values(fry(v$E, inputs$sets, inputs$additive, gene.weights = seq(0.5, 2, length.out = 2000)))
+out$fry_contrast <- gs_values(fry(v, inputs$sets, inputs$additive, contrast = c(0, 1, -1, 0, 0)))
+out$fry_block <- gs_values(fry(v, inputs$sets, oneway, block = inputs$block, correlation = 0.3))
+out$fry_weighted_set <- gs_values(fry(v, wsets, inputs$additive), wsets)
+out$fry_dgelist <- gs_values(fry(estimateDisp(dgebig), inputs$sets))
 
 inputs$version <- c(R = as.character(getRversion()),
                     edgeR = as.character(packageVersion("edgeR")),
