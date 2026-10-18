@@ -404,9 +404,15 @@ def _fit_f_dist_robustly(x, df1, covariate=None, winsor_tail_p=(0.05, 0.1)):
             scale = np.empty(n)
             scale[ok] = scale_ok
             from scipy.interpolate import interp1d
-            f_interp = interp1d(covariate[ok], np.log(scale_ok), kind='linear',
-                                bounds_error=False, fill_value='extrapolate')
-            scale[~ok] = np.exp(f_interp(covariate[~ok]))
+            # R's approx(..., rule = 2) holds the end values constant
+            # outside the covariate range
+            x_ok = covariate[ok]
+            f_interp = interp1d(x_ok, np.log(scale_ok), kind='linear',
+                                bounds_error=False,
+                                fill_value=(np.log(scale_ok[0]),
+                                            np.log(scale_ok[-1])))
+            scale[~ok] = np.exp(f_interp(np.clip(covariate[~ok],
+                                                 x_ok.min(), x_ok.max())))
 
         return {'scale': scale, 'df2': fit['df2'], 'df2_shrunk': df2_shrunk_full}
 
@@ -451,14 +457,28 @@ def _fit_f_dist_robustly(x, df1, covariate=None, winsor_tail_p=(0.05, 0.1)):
                 s = nr_s20[i]
             f_vals = x[i] / s
             d2 = nr_df2
-            pupper = stats.f.logsf(f_vals, df1[i], d2)
-            plower = stats.f.logcdf(f_vals, df1[i], d2)
+            # R's pf/qf take df2 = Inf, where scipy's f returns NaN, so use
+            # the chi-squared limit: F(d1, Inf) = chi2(d1) / d1
+            if np.isinf(d2):
+                pupper = stats.chi2.logsf(df1[i] * f_vals, df1[i])
+                plower = stats.chi2.logcdf(df1[i] * f_vals, df1[i])
+            else:
+                pupper = stats.f.logsf(f_vals, df1[i], d2)
+                plower = stats.f.logcdf(f_vals, df1[i], d2)
             up = pupper < plower
             f_new = f_vals.copy()
             if np.any(up):
-                f_new[up] = stats.f.isf(np.exp(np.clip(pupper[up], -500, 0)), df1max, d2)
+                if np.isinf(d2):
+                    f_new[up] = stats.chi2.isf(
+                        np.exp(np.clip(pupper[up], -500, 0)), df1max) / df1max
+                else:
+                    f_new[up] = stats.f.isf(np.exp(np.clip(pupper[up], -500, 0)), df1max, d2)
             if np.any(~up):
-                f_new[~up] = stats.f.ppf(np.exp(np.clip(plower[~up], -500, 0)), df1max, d2)
+                if np.isinf(d2):
+                    f_new[~up] = stats.chi2.ppf(
+                        np.exp(np.clip(plower[~up], -500, 0)), df1max) / df1max
+                else:
+                    f_new[~up] = stats.f.ppf(np.exp(np.clip(plower[~up], -500, 0)), df1max, d2)
             x[i] = f_new * s
             df1_val = df1max
         else:
@@ -473,9 +493,13 @@ def _fit_f_dist_robustly(x, df1, covariate=None, winsor_tail_p=(0.05, 0.1)):
         ztrend = float(stats.trim_mean(z, proportiontocut=wtp[1]))
         zresid = z - ztrend
     else:
-        from .weighted_lowess import weighted_lowess as _wlowess
-        lo = _wlowess(covariate, z, span=0.4, iterations=4, npts=200)
-        ztrend = lo['fitted']
+        # limma's loessFit(z, covariate, span = 0.4) without weights is R's
+        # lowess(f = 0.4, iter = 3), which statsmodels' lowess matches
+        from statsmodels.nonparametric.smoothers_lowess import lowess as _sm_lowess
+        ztrend = _sm_lowess(z, covariate, frac=0.4, it=3,
+                            delta=0.01 * np.ptp(covariate),
+                            is_sorted=False, missing='raise',
+                            return_sorted=False)
         zresid = z - ztrend
 
     # Winsorize z-residuals
@@ -497,13 +521,20 @@ def _fit_f_dist_robustly(x, df1, covariate=None, winsor_tail_p=(0.05, 0.1)):
 
     def winsorized_moments(d1, d2, wtp_arg):
         """Compute Winsorized mean and variance of log(F(d1, d2))."""
-        fq = stats.f.ppf([wtp_arg[0], 1.0 - wtp_arg[1]], d1, d2)
+        # Chi-squared limit at infinite d2, where scipy's f returns NaN
+        if np.isinf(d2):
+            fq = stats.chi2.ppf(np.array([wtp_arg[0], 1.0 - wtp_arg[1]]), d1) / d1
+        else:
+            fq = stats.f.ppf([wtp_arg[0], 1.0 - wtp_arg[1]], d1, d2)
         zq = np.log(fq)
         q = linkfun(fq)
         nodes = q[0] + (q[1] - q[0]) * gl_nodes_01
         fnodes = linkinv(nodes)
         znodes = np.log(fnodes)
-        f_dens = stats.f.pdf(fnodes, d1, d2) / (1.0 - nodes) ** 2
+        if np.isinf(d2):
+            f_dens = d1 * stats.chi2.pdf(d1 * fnodes, d1) / (1.0 - nodes) ** 2
+        else:
+            f_dens = stats.f.pdf(fnodes, d1, d2) / (1.0 - nodes) ** 2
         q21 = q[1] - q[0]
         wtp_arr = np.array(wtp_arg)
         m_val = q21 * np.sum(gl_weights_01 * f_dens * znodes) + np.sum(zq * wtp_arr)

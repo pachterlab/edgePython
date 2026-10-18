@@ -595,7 +595,8 @@ def glm_ql_fit(y, design=None, dispersion=None, offset=None, lib_size=None,
     # Empirical Bayes moderation
     s2 = np.maximum(s2, 0)
     s2_fit = squeeze_var(s2, df=df_residual, covariate=ave_log_cpm,
-                         robust=robust, winsor_tail_p=winsor_tail_p)
+                         robust=robust, winsor_tail_p=winsor_tail_p,
+                         legacy=legacy)
 
     fit['df.prior'] = s2_fit['df_prior']
     fit['s2.post'] = s2_fit['var_post']
