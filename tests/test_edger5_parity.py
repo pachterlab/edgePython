@@ -637,3 +637,50 @@ CAMERA_CASES = {
 def test_camera_and_fry_match_limma(big_voom, case):
     names = ["w1"] if "weighted_set" in case else None
     _assert_gene_set_table(CAMERA_CASES[case](big_voom), case, names)
+
+
+# sampleWeights, glmLRT on a matrix fit, normLibSizes
+
+BIG_WEIGHTS = (0.5 + (np.arange(1, 2000 * 9 + 1) * 7919 % 1000) / 1000).reshape(9, 2000).T
+
+
+@pytest.fixture(scope="module")
+def big_disp():
+    return ep.estimate_disp(_big_dgelist(), ADDITIVE)
+
+
+def test_sample_weights_match_edger5(big_disp):
+    fit = ep.glm_ql_fit(big_disp, ADDITIVE)
+    w = ep.sample_weights(fit)
+    assert w.shape == BIG.shape
+    _assert_close(w[0], _edger("sample_weights"), rtol=1e-10)
+    np.testing.assert_array_equal(w, np.tile(w[0], (BIG.shape[0], 1)))
+
+    weighted = dict(big_disp, weights=BIG_WEIGHTS)
+    _assert_close(ep.sample_weights(ep.glm_ql_fit(weighted, ADDITIVE))[0],
+                  _edger("sample_weights_obs"), rtol=1e-10)
+
+    lib_size = big_disp["samples"]["lib.size"].to_numpy()
+    fit_m = ep.glm_ql_fit(BIG, ONEWAY, dispersion=0.1, offset=np.log(lib_size))
+    _assert_close(ep.sample_weights(fit_m)[0], _edger("sample_weights_matrix"), rtol=1e-10)
+
+    refit = ep.glm_ql_fit(dict(big_disp, weights=w), ADDITIVE)
+    _assert_close(ep.glm_ql_ftest(refit, coef=4)["table"]["PValue"][:200],
+                  _edger("sample_weights_refit"), rtol=1e-7, atol=1e-12)
+
+
+def test_sample_weights_need_a_new_ql_fit(big_disp):
+    with pytest.raises(ValueError, match="legacy"):
+        ep.sample_weights(ep.glm_fit(big_disp, ADDITIVE))
+
+
+def test_glm_lrt_on_a_matrix_fit_matches_edger():
+    fit = ep.glm_fit(COUNTS, ADDITIVE, dispersion=DISPERSION, offset=OFFSET)
+    tab = ep.glm_lrt(fit, coef=4)["table"]
+    _assert_close(tab["logCPM"], _edger("lrt_matrix", "logCPM"), rtol=1e-10)
+    _assert_close(tab["LR"], _edger("lrt_matrix", "LR"), rtol=1e-8, atol=1e-10)
+    _assert_close(tab["PValue"], _edger("lrt_matrix", "PValue"), rtol=1e-8, atol=1e-14)
+
+
+def test_norm_lib_sizes_is_calc_norm_factors():
+    assert ep.norm_lib_sizes is ep.calc_norm_factors

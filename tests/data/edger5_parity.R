@@ -322,6 +322,24 @@ out$fry_block <- gs_values(fry(v, inputs$sets, oneway, block = inputs$block, cor
 out$fry_weighted_set <- gs_values(fry(v, wsets, inputs$additive), wsets)
 out$fry_dgelist <- gs_values(fry(estimateDisp(dgebig), inputs$sets))
 
+# sampleWeights from glmQLFit fits: from a DGEList, with observation weights
+# (which glmQLFit.DGEList takes from y$weights),
+# from a matrix with a fixed dispersion, and a refit using the weights
+dgeb <- estimateDisp(dgebig, inputs$additive)
+qb <- glmQLFit(dgeb, inputs$additive)
+out$sample_weights <- sampleWeights(qb)[1, ]
+# Weights from a formula, rebuilt in the tests rather than stored
+big_weights <- matrix(0.5 + ((seq_len(2000 * nlibs) * 7919) %% 1000) / 1000, 2000, nlibs)
+dgebw <- dgeb; dgebw$weights <- big_weights
+out$sample_weights_obs <- sampleWeights(glmQLFit(dgebw, inputs$additive))[1, ]
+qm <- glmQLFit(inputs$big_counts, inputs$oneway, dispersion = 0.1, offset = log(dgeb$samples$lib.size))
+out$sample_weights_matrix <- sampleWeights(qm)[1, ]
+dgebs <- dgeb; dgebs$weights <- as.matrix(sampleWeights(qb))
+out$sample_weights_refit <- glmQLFTest(glmQLFit(dgebs, inputs$additive), coef = 5)$table$PValue[1:200]
+# glmLRT on a fit from a plain matrix: aveLogCPM uses the fit's offset and dispersion
+lm_fit <- glmFit(counts, inputs$additive, dispersion = dispersion, offset = offset)
+out$lrt_matrix <- as.list(glmLRT(lm_fit, coef = 5)$table[, c("logCPM", "LR", "PValue")])
+
 inputs$version <- c(R = as.character(getRversion()),
                     edgeR = as.character(packageVersion("edgeR")),
                     limma = as.character(packageVersion("limma")))

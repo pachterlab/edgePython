@@ -623,6 +623,84 @@ def compute_adjust_vec(y, mu, design, dispersion, prior, weights=None):
     return {'df': df_out, 'deviance': dev_out, 's2': s2_out}
 
 
+@njit(cache=True, parallel=True)
+def _compute_adjust_mat_inner(y, mu, design, disp_mat, w_mat, prior, dev_out, df_out):
+    """Numba-compiled inner loop for compute_adjust_mat."""
+    ntag = y.shape[0]
+    nlib = y.shape[1]
+
+    for tag in prange(ntag):
+        urow = mu[tag]
+        drow = disp_mat[tag]
+        wrow = w_mat[tag]
+        zwpt = np.empty(nlib)
+        for j in range(nlib):
+            zwpt[j] = math.sqrt(urow[j] * wrow[j] / (1.0 + urow[j] * drow[j] / prior))
+        hvals = _hat_values(design, zwpt)
+        for lib in range(nlib):
+            alpha, kappa = compute_weight(urow[lib], drow[lib], prior / wrow[lib])
+            udp = compute_unit_nb_deviance(y[tag, lib], urow[lib], drow[lib] * wrow[lib] / prior)
+            hdp = 1.0 - hvals[lib]
+            if hdp < THRESHOLD_ZERO:
+                udp = 0.0
+                hdp = 0.0
+            dev_out[tag, lib] = udp * alpha
+            df_out[tag, lib] = hdp * kappa
+
+
+def _as_tag_lib_matrix(x, ntag, nlib, default):
+    """Dispersions or weights as a genes x samples matrix."""
+    if x is None:
+        return np.full((ntag, nlib), default)
+    x = np.asarray(x, dtype=np.float64)
+    if x.size == 1:
+        return np.full((ntag, nlib), float(x.ravel()[0]))
+    if x.ndim == 1 and len(x) == ntag:
+        return np.repeat(x[:, None], nlib, axis=1)
+    return np.ascontiguousarray(np.broadcast_to(x, (ntag, nlib)), dtype=np.float64)
+
+
+def compute_adjust_mat(y, mu, design, dispersion, prior, weights=None):
+    """Adjusted unit deviances and unit df for every gene and sample.
+
+    Port of edgeR 5.0's compute_adjust_mat() (ql_glm.c), the per-observation
+    version of compute_adjust_vec(). Returns dict with 'unit_deviance' and
+    'unit_df' (genes x samples).
+    """
+    y = np.asarray(y, dtype=np.float64)
+    ntag, nlib = y.shape
+    disp_mat = _as_tag_lib_matrix(dispersion, ntag, nlib, 0.0)
+    w_mat = _as_tag_lib_matrix(weights, ntag, nlib, 1.0)
+    dev_out = np.zeros((ntag, nlib))
+    df_out = np.zeros((ntag, nlib))
+    _compute_adjust_mat_inner(y, np.asarray(mu, dtype=np.float64),
+                              np.asarray(design, dtype=np.float64), disp_mat, w_mat,
+                              float(prior), dev_out, df_out)
+    return {'unit_deviance': dev_out, 'unit_df': df_out}
+
+
+def sample_weights(glmfit):
+    """Empirical sample (quality) weights from adjusted unit deviances.
+
+    Port of edgeR 5.0's sampleWeights() for a fit from glm_ql_fit (with
+    legacy=False). The quasi-dispersion of each observation is taken to be
+    s2_g / w_i; returns the sample weights w_i, scaled to geometric mean 1,
+    as a genes x samples matrix (each row the same) for use as weights.
+    """
+    if glmfit.get('average.ql.dispersion') is None:
+        raise ValueError("Please run glm_ql_fit with legacy=False first")
+    y = np.asarray(glmfit['counts'], dtype=np.float64)
+    ntag, nlib = y.shape
+    w_mat = _as_tag_lib_matrix(glmfit.get('weights'), ntag, nlib, 1.0)
+    out = compute_adjust_mat(y, glmfit['fitted.values'], glmfit['design'],
+                             glmfit['dispersion'], glmfit['average.ql.dispersion'], w_mat)
+    s2 = np.maximum(np.asarray(glmfit['s2.prior'], dtype=np.float64), 1.0)
+    s2 = np.broadcast_to(s2.reshape(-1, 1) if s2.size > 1 else s2.reshape(1, 1), (ntag, 1))
+    w = np.log((out['unit_deviance'] * w_mat / s2).sum(axis=0) / out['unit_df'].sum(axis=0))
+    w = np.exp(np.mean(w) - w)
+    return np.tile(w, (ntag, 1))
+
+
 # ---------------------------------------------------------------------------
 # compute_prior: average quasi-dispersion using lowess trend
 # ---------------------------------------------------------------------------

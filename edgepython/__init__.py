@@ -24,7 +24,7 @@ from .dgelist import (
 )
 
 # --- Normalization ---
-from .normalization import calc_norm_factors, normalize_chip_to_input, calc_norm_offsets_for_chip
+from .normalization import calc_norm_factors, norm_lib_sizes, normalize_chip_to_input, calc_norm_offsets_for_chip
 
 # --- Expression ---
 from .expression import cpm, rpkm, tpm, ave_log_cpm, cpm_by_group, rpkm_by_group
@@ -47,6 +47,7 @@ from .dispersion import (
 
 # --- GLM fitting ---
 from .glm_fit import glm_fit, glm_ql_fit, mglm_one_group, mglm_one_way
+from .ql_weights import sample_weights
 
 # --- GLM testing ---
 from .glm_test import glm_lrt, glm_ql_ftest, glm_treat

@@ -200,6 +200,17 @@ def ave_log_cpm(y, lib_size=None, offset=None, prior_count=2, dispersion=None,
 
     Port of edgeR's aveLogCPM().
     """
+    # DGEGLM input: the fit's offset, dispersion and weights (aveLogCPM.DGEGLM)
+    if isinstance(y, dict) and 'counts' in y and 'coefficients' in y:
+        if dispersion is None:
+            dispersion = y.get('dispersion')
+        if dispersion is None:
+            return _ave_log_cpm_default(y['counts'], prior_count=prior_count,
+                                        dispersion=0, weights=y.get('weights'))
+        return _ave_log_cpm_default(y['counts'], offset=y.get('offset'),
+                                    prior_count=prior_count, dispersion=dispersion,
+                                    weights=y.get('weights'))
+
     # DGEList input
     if isinstance(y, dict) and 'counts' in y:
         dge = y
