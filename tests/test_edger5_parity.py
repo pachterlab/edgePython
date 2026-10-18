@@ -6,6 +6,7 @@ data/edger5_parity.R, which also writes the inputs.
 
 import gzip
 import json
+import re
 from pathlib import Path
 
 import numpy as np
@@ -769,3 +770,220 @@ def test_dgelist_subsetting_with_index_arrays(key):
     for k in ("counts", "offset.prior", "weights"):
         np.testing.assert_array_equal(sub[k], np.asarray(dge[k])[i][:, j])
     assert sub["genes"].shape[0] == len(i)
+
+
+# catch* readers on simulated quantifier output (data/quant, from make_quant_files.py)
+
+QUANT = DATA / "quant"
+
+
+def _assert_catch(y, case, rtol=1e-12, strip_versions=False):
+    expected = EDGER[case]
+    ids = [re.sub(r"\.[0-9]+", "", i, count=1) for i in expected["ids"]] if strip_versions else expected["ids"]
+    assert list(y["genes"].index) == ids
+    assert list(y["samples"].index) == expected["samples"]
+    _assert_close(y["counts"], _as_array(expected["counts"]), rtol=rtol)
+    assert list(y["genes"].columns) == list(expected["genes"])
+    for col, values in expected["genes"].items():
+        if values and isinstance(values[0], str):
+            assert list(y["genes"][col].astype(str)) == values, col
+        else:
+            _assert_close(y["genes"][col].to_numpy(float), _as_array(values), rtol=rtol)
+    for key, ours in (("offset_prior", y.get("offset.prior")),
+                      ("effective_length", y.get("other", {}).get("effective.length"))):
+        if expected[key] == {}:
+            assert ours is None, key
+        else:
+            _assert_close(np.asarray(ours, dtype=float), _as_array(expected[key]), rtol=rtol, atol=1e-13)
+    assert y["overdispersion.prior"] == pytest.approx(_as_array(expected["overdispersion_prior"]), rel=rtol)
+    assert y["resample.type"] == expected["resample_type"]
+    assert y["divided.counts"] == expected["divided"][0]
+
+
+@pytest.mark.parametrize("case, reader, kwargs", [
+    ("catch_salmon", "catch_salmon", {}),
+    ("catch_salmon_raw", "catch_salmon", {"divide": False, "impute_eff_len": False, "offset_prior": False}),
+    ("catch_salmon_gene_moderate", "catch_salmon_gene", {}),
+    ("catch_salmon_gene_tximport", "catch_salmon_gene", {"gene_length": "tximport"}),
+    ("catch_salmon_gene_simple", "catch_salmon_gene", {"gene_length": "simple"}),
+    ("catch_kallisto", "catch_kallisto", {}),
+    ("catch_oarfish", "catch_oarfish", {}),
+])
+def test_catch_readers_match_edger5(case, reader, kwargs):
+    folder = {"salmon": "salmon", "kallisto": "kallisto", "oarfish": "oarfish"}[reader.split("_")[1]]
+    y = getattr(ep, reader)(str(QUANT / folder), verbose=False, **kwargs)
+    if reader == "catch_salmon_gene":
+        # edgePython adds Max2MinEffLen, which catchKallistoGene has and catchSalmonGene lacks
+        y["genes"] = y["genes"].drop(columns="Max2MinEffLen")
+    _assert_catch(y, case)
+
+
+@pytest.mark.parametrize("case, kwargs", [("catch_kallisto_gene", {}),
+                                          ("catch_kallisto_gene_simple", {"gene_length": "simple"})])
+def test_catch_kallisto_gene_matches_edger5(case, kwargs):
+    import pandas as pd
+    tx2gene = pd.read_csv(QUANT / "tx2gene.tsv", sep="\t")
+    y = ep.catch_kallisto_gene(str(QUANT / "kallisto"), tx2gene=tx2gene, verbose=False, **kwargs)
+    # catchKallistoGene keeps tx2gene's gene versions; remove_version removes
+    # them, as documented for catchSalmonGene and as catchSalmonGene does
+    _assert_catch(y, case, strip_versions=True)
+
+
+def test_catch_rsem_matches_edger5():
+    _assert_catch(ep.catch_rsem(str(QUANT / "rsem"), ngibbs=50, verbose=False), "catch_rsem")
+
+
+def test_split_and_collapse_gencode_match_edger5():
+    import pandas as pd
+    names = pd.read_csv(QUANT / "salmon" / "s1" / "quant.sf", sep="\t")["Name"]
+    sp = ep.split_gencode_tx_names(names)
+    for col, values in EDGER["split_gencode"].items():
+        assert list(sp[col]) == values
+    raw = ep.split_gencode_tx_names(names[:3], remove_version=False)
+    np.testing.assert_array_equal(raw[["EnsT", "EnsG"]].to_numpy(), np.array(EDGER["split_gencode_version"]))
+    cg = ep.collapse_gencode_tx2gene(sp)
+    expected = EDGER["collapse_gencode"]
+    assert list(cg.index) == expected["ids"]
+    assert list(cg["GeneName"]) == expected["GeneName"]
+    assert list(cg["TxTypes"]) == expected["TxTypes"]
+    assert list(cg["NPCTx"]) == expected["NPCTx"]
+
+
+@pytest.mark.parametrize("layout", ["dirs", "flat"])
+def test_catch_lr_kallisto_matches_edger_kallisto_reader(layout):
+    # Per-sample quant-tcc output is kallisto's: abundance_<n>/abundance.h5
+    # (--matrix-to-directories), or flat plaintext abundance_<n>.tsv with
+    # bs_abundance_<n>_<b>.tsv (--matrix-to-files --plaintext)
+    y = ep.catch_lr_kallisto(str(QUANT / "lr_kallisto" / layout), verbose=False)
+    _assert_catch(y, "catch_lr_kallisto")
+    g = ep.catch_lr_kallisto_gene(str(QUANT / "lr_kallisto" / layout), verbose=False)
+    _assert_catch(g, "catch_lr_kallisto_gene")
+
+
+def test_catch_lr_kallisto_reads_the_matrix_without_bootstraps():
+    path = str(QUANT / "lr_kallisto" / "matrix")
+    with pytest.warns(UserWarning, match="no bootstraps"):
+        y = ep.catch_lr_kallisto(path, sample_names=["a", "b", "c"], verbose=False)
+    # The matrix has no transcript lengths, so effective lengths can't be imputed
+    raw = ep.catch_lr_kallisto(str(QUANT / "lr_kallisto" / "dirs"), divide=False, impute_eff_len=False,
+                               verbose=False)
+    np.testing.assert_array_equal(y["counts"], raw["counts"])
+    assert list(y["samples"].index) == ["a", "b", "c"]
+    assert y["divided.counts"] is False and np.all(np.isnan(y["genes"]["Overdispersion"]))
+    # Effective lengths are only written for transcripts with reads; the
+    # others get the transcript's geometric mean over samples
+    eff = y["other"]["effective.length"].to_numpy()
+    assert np.all(eff > 0)
+    has_reads = raw["counts"] > 0
+    np.testing.assert_allclose(eff[has_reads], raw["other"]["effective.length"].to_numpy()[has_reads],
+                               rtol=1e-15)
+    with pytest.warns(UserWarning):
+        g = ep.catch_lr_kallisto_gene(path, verbose=False)
+    np.testing.assert_allclose(g["counts"], ep.catch_lr_kallisto_gene(
+        str(QUANT / "lr_kallisto" / "dirs"), divide=False, verbose=False)["counts"], rtol=1e-13)
+
+
+def test_catch_kallisto_reads_plaintext_bootstraps():
+    import pandas.testing as pdt
+    h5 = ep.catch_kallisto(str(QUANT / "kallisto"), verbose=False)
+    tsv = ep.catch_kallisto(str(QUANT / "kallisto_tsv"), verbose=False)
+    np.testing.assert_allclose(tsv["counts"], h5["counts"], rtol=1e-14)
+    pdt.assert_frame_equal(tsv["genes"], h5["genes"], rtol=1e-14)
+
+
+def _moderated(od, df):
+    from scipy.stats import f as f_dist
+    i = df > 0
+    od = od.copy()
+    od[i] /= df[i]
+    prior = max(np.median(od[i]) / f_dist.ppf(0.5, np.median(df[i]), 3), 1)
+    od[i] = (3 * prior + df[i] * od[i]) / (3 + df[i])
+    od = np.maximum(od, 1)
+    od[~i] = prior
+    return od
+
+
+def test_catch_oarfish_gene_sums_counts_and_bootstraps():
+    import pandas as pd
+    tx = ep.catch_oarfish(str(QUANT / "oarfish"), divide=False, verbose=False)
+    g = ep.catch_oarfish_gene(str(QUANT / "oarfish"), verbose=False)
+    codes, genes = pd.factorize(tx["genes"]["EnsG"])
+    assert list(g["genes"].index) == list(genes)
+    assert list(g["genes"].columns) == ["GeneName", "TxTypes", "NPCTx", "NTx", "MaxTxLen", "Overdispersion"]
+    od, df = np.zeros(len(genes)), np.zeros(len(genes))
+    for j in (1, 2, 3):
+        b = pd.read_parquet(QUANT / "oarfish" / f"o{j}.infreps.pq").to_numpy()
+        s = np.zeros((len(genes), b.shape[1]))
+        np.add.at(s, codes, b)
+        m = s.mean(axis=1)
+        pos = m > 0
+        od[pos] += ((s[pos] - m[pos, None]) ** 2).sum(axis=1) / m[pos]
+        df[pos] += b.shape[1] - 1
+    od = _moderated(od, df)
+    np.testing.assert_allclose(g["genes"]["Overdispersion"], od, rtol=1e-13)
+    summed = np.zeros((len(genes), 3))
+    np.add.at(summed, codes, tx["counts"])
+    np.testing.assert_allclose(g["counts"], summed / od[:, None], rtol=1e-13)
+    assert g.get("offset.prior") is None
+
+
+def test_catch_rsem_gene_reads_gene_results():
+    import pandas as pd
+    tabs = [pd.read_csv(QUANT / "rsem" / f"r{j}.genes.results", sep="\t") for j in (1, 2, 3)]
+    y = ep.catch_rsem_gene(str(QUANT / "rsem"), ngibbs=50, verbose=False)
+    assert list(y["genes"].index) == [re.sub(r"\.[0-9]+", "", i, count=1) for i in tabs[0]["gene_id"]]
+    assert list(y["samples"].index) == ["r1", "r2", "r3"]
+    np.testing.assert_array_equal(y["genes"]["NTx"], tabs[0]["transcript_id(s)"].str.count(",") + 1)
+    # Overdispersions from RSEM's genewise Gibbs summaries, as catchRSEM does for transcripts
+    od, df = np.zeros(len(tabs[0])), np.zeros(len(tabs[0]))
+    for t in tabs:
+        m, s = t["posterior_mean_count"].to_numpy(), t["posterior_standard_deviation_of_count"].to_numpy()
+        pos = m > 0
+        od[pos] += 49 * s[pos] ** 2 / m[pos]
+        df[pos] += 49
+    od = _moderated(od, df)
+    np.testing.assert_allclose(y["genes"]["Overdispersion"], od, rtol=1e-13)
+    counts = np.column_stack([t["expected_count"] for t in tabs])
+    np.testing.assert_allclose(y["counts"], counts / od[:, None], rtol=1e-13)
+    # The gene with no reads has zero effective lengths, replaced by 1
+    eff = y["other"]["effective.length"].to_numpy()
+    assert np.all(eff > 0) and np.all(np.isfinite(y["offset.prior"]))
+
+
+def test_catch_readers_where_edger5_fails(tmp_path):
+    import shutil
+    import pandas as pd
+    # Gene readers with verbose=False (edgeR stops: the else binds to if(verbose))
+    assert ep.catch_salmon_gene(str(QUANT / "salmon"), verbose=False)["counts"].shape == (14, 3)
+    # No resamples: counts are left undivided (edgeR divides by NA and fails)
+    for j in (1, 2, 3):
+        shutil.copytree(QUANT / "salmon" / f"s{j}", tmp_path / f"s{j}")
+        meta = tmp_path / f"s{j}" / "aux_info" / "meta_info.json"
+        m = json.loads(meta.read_text())
+        m["num_bootstraps"] = 0
+        meta.write_text(json.dumps(m))
+    y = ep.catch_salmon(str(tmp_path), verbose=False)
+    assert y["divided.counts"] is False and np.isnan(y["overdispersion.prior"])
+    np.testing.assert_array_equal(
+        y["counts"], ep.catch_salmon(str(QUANT / "salmon"), divide=False, verbose=False)["counts"])
+    # gene_length='tximport' when no gene is all zero (edgeR returns the
+    # counts); the gene given reads here has no TPM, so gets the unweighted average
+    for j in (1, 2, 3):
+        q = tmp_path / f"s{j}" / "quant.sf"
+        t = pd.read_csv(q, sep="\t")
+        t.loc[t["NumReads"] == 0, "NumReads"] = 5.0
+        t.to_csv(q, sep="\t", index=False, float_format="%.17g")
+    g = ep.catch_salmon_gene(str(tmp_path), gene_length="tximport", divide=False, verbose=False)
+    eff = g["other"]["effective.length"].to_numpy()
+    assert not np.allclose(eff, g["counts"])
+    assert np.all((eff > 0) & np.isfinite(eff))
+
+
+def test_catch_readers_old_calls_and_plain_lists():
+    dirs = [str(QUANT / "salmon" / f"s{j}") for j in (1, 2, 3)]
+    y = ep.catch_salmon(dirs, verbose=False)
+    _assert_catch(y, "catch_salmon")
+    out = ep.catch_salmon(str(QUANT / "salmon"), dgelist=False, verbose=False)
+    assert set(out) == {"counts", "effective.length", "annotation", "overdispersion.prior",
+                        "resample.type", "divided.counts"}
+    np.testing.assert_array_equal(out["counts"].to_numpy(), y["counts"])

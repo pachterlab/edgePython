@@ -70,14 +70,25 @@ from .io import (
     to_anndata,
     read_dge,
     read_10x,
-    catch_salmon,
-    catch_kallisto,
-    catch_rsem,
     feature_counts_to_dgelist,
     read_bismark2dge,
     seurat_to_pb,
     dgelist_from_tximport,
     dgelist_from_tximeta,
+)
+from .quant_readers import (
+    catch_salmon,
+    catch_salmon_gene,
+    catch_kallisto,
+    catch_kallisto_gene,
+    catch_oarfish,
+    catch_oarfish_gene,
+    catch_rsem,
+    catch_rsem_gene,
+    catch_lr_kallisto,
+    catch_lr_kallisto_gene,
+    split_gencode_tx_names,
+    collapse_gencode_tx2gene,
 )
 
 # --- Visualization ---

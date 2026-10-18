@@ -2168,66 +2168,464 @@ api:
   - name: catch_salmon
     kind: function
     domain: io
-    module: edgepython.io
+    module: edgepython.quant_readers
     r_equivalent: catchSalmon
     description: >-
-      Read Salmon quantification output directories into a DGEList with
-      overdispersion estimates from inferential replicates.
+      Read Salmon transcript quantifications with bootstrap or Gibbs
+      samples, estimating RTA overdispersions and dividing the counts by
+      them. Unpacks Gencode transcript names and stores the centred log
+      effective lengths as offset.prior.
     params:
-      - name: paths
+      - name: parent_dir
+        type: str
+        default: null
+      - name: sample_dirs
         type: list
-        required: true
+        default: null
+      - name: dgelist
+        type: bool
+        default: true
+      - name: divide
+        type: bool
+        default: true
+      - name: impute_eff_len
+        type: bool
+        default: true
+      - name: offset_prior
+        type: bool
+        default: true
       - name: verbose
         type: bool
         default: true
     returns:
-      type: DGEList
+      type: [DGEList, dict]
     impl_status: complete
-    test_status: untested
+    test_status: tested
+    tests:
+      - test_edger5_parity.py
     citations:
       - baldoni2024a
       - baldoni2024b
 
+  - name: catch_salmon_gene
+    kind: function
+    domain: io
+    module: edgepython.quant_readers
+    r_equivalent: catchSalmonGene
+    description: >-
+      Read Salmon quantifications summarized to genes, from Gencode
+      transcript names or a tx2gene table; counts and resamples are
+      summed over transcripts before overdispersions are estimated.
+    params:
+      - name: parent_dir
+        type: str
+        default: null
+      - name: sample_dirs
+        type: list
+        default: null
+      - name: tx2gene
+        type: DataFrame
+        default: null
+      - name: remove_version
+        type: bool
+        default: true
+      - name: dgelist
+        type: bool
+        default: true
+      - name: divide
+        type: bool
+        default: true
+      - name: impute_eff_len
+        type: bool
+        default: true
+      - name: offset_prior
+        type: bool
+        default: true
+      - name: verbose
+        type: bool
+        default: true
+      - name: gene_length
+        type: str
+        default: moderate
+    returns:
+      type: [DGEList, dict]
+    impl_status: complete
+    test_status: tested
+    tests:
+      - test_edger5_parity.py
+    citations:
+      - baldoni2024a
+
   - name: catch_kallisto
     kind: function
     domain: io
-    module: edgepython.io
+    module: edgepython.quant_readers
     r_equivalent: catchKallisto
     description: >-
-      Read kallisto quantification output (HDF5 or plaintext) into a
-      DGEList with overdispersion estimates from bootstraps.
+      Read kallisto transcript quantifications (abundance.h5, or
+      abundance.tsv with plaintext bootstraps) with bootstrap-based RTA
+      overdispersions.
     params:
-      - name: paths
+      - name: parent_dir
+        type: str
+        default: null
+      - name: sample_dirs
         type: list
-        required: true
+        default: null
+      - name: dgelist
+        type: bool
+        default: true
+      - name: divide
+        type: bool
+        default: true
+      - name: impute_eff_len
+        type: bool
+        default: true
+      - name: offset_prior
+        type: bool
+        default: true
       - name: verbose
         type: bool
         default: true
     returns:
-      type: DGEList
+      type: [DGEList, dict]
     impl_status: complete
-    test_status: untested
+    test_status: tested
+    tests:
+      - test_edger5_parity.py
+    citations:
+      - baldoni2024a
+
+  - name: catch_kallisto_gene
+    kind: function
+    domain: io
+    module: edgepython.quant_readers
+    r_equivalent: catchKallistoGene
+    description: >-
+      Read kallisto quantifications summarized to genes, as
+      catch_salmon_gene.
+    params:
+      - name: parent_dir
+        type: str
+        default: null
+      - name: sample_dirs
+        type: list
+        default: null
+      - name: tx2gene
+        type: DataFrame
+        default: null
+      - name: remove_version
+        type: bool
+        default: true
+      - name: dgelist
+        type: bool
+        default: true
+      - name: divide
+        type: bool
+        default: true
+      - name: impute_eff_len
+        type: bool
+        default: true
+      - name: offset_prior
+        type: bool
+        default: true
+      - name: verbose
+        type: bool
+        default: true
+      - name: gene_length
+        type: str
+        default: moderate
+    returns:
+      type: [DGEList, dict]
+    impl_status: complete
+    test_status: tested
+    tests:
+      - test_edger5_parity.py
+    citations:
+      - baldoni2024a
+
+  - name: catch_lr_kallisto
+    kind: function
+    domain: io
+    module: edgepython.quant_readers
+    r_equivalent: null
+    description: >-
+      edgePython addition. Read lr-kallisto (kallisto quant-tcc) output:
+      per-sample abundance files with bootstraps (--matrix-to-
+      directories or --matrix-to-files), or matrix.abundance.mtx without
+      bootstraps.
+    params:
+      - name: parent_dir
+        type: str
+        default: .
+      - name: sample_names
+        type: list
+        default: null
+      - name: dgelist
+        type: bool
+        default: true
+      - name: divide
+        type: bool
+        default: true
+      - name: impute_eff_len
+        type: bool
+        default: true
+      - name: offset_prior
+        type: bool
+        default: true
+      - name: verbose
+        type: bool
+        default: true
+    returns:
+      type: [DGEList, dict]
+    impl_status: complete
+    test_status: tested
+    tests:
+      - test_edger5_parity.py
+    citations:
+      - baldoni2024a
+
+  - name: catch_lr_kallisto_gene
+    kind: function
+    domain: io
+    module: edgepython.quant_readers
+    r_equivalent: null
+    description: >-
+      edgePython addition. lr-kallisto quantifications summarized to
+      genes.
+    params:
+      - name: parent_dir
+        type: str
+        default: .
+      - name: sample_names
+        type: list
+        default: null
+      - name: tx2gene
+        type: DataFrame
+        default: null
+      - name: remove_version
+        type: bool
+        default: true
+      - name: dgelist
+        type: bool
+        default: true
+      - name: divide
+        type: bool
+        default: true
+      - name: impute_eff_len
+        type: bool
+        default: true
+      - name: offset_prior
+        type: bool
+        default: true
+      - name: verbose
+        type: bool
+        default: true
+      - name: gene_length
+        type: str
+        default: moderate
+    returns:
+      type: [DGEList, dict]
+    impl_status: complete
+    test_status: tested
+    tests:
+      - test_edger5_parity.py
+    citations:
+      - baldoni2024a
+
+  - name: catch_oarfish
+    kind: function
+    domain: io
+    module: edgepython.quant_readers
+    r_equivalent: catchOarfish
+    description: >-
+      Read oarfish long-read transcript quantifications with parquet
+      bootstraps (needs pyarrow).
+    params:
+      - name: parent_dir
+        type: str
+        default: null
+      - name: prefixes
+        type: list
+        default: null
+      - name: dgelist
+        type: bool
+        default: true
+      - name: divide
+        type: bool
+        default: true
+      - name: verbose
+        type: bool
+        default: true
+    returns:
+      type: [DGEList, dict]
+    impl_status: complete
+    test_status: tested
+    tests:
+      - test_edger5_parity.py
+    citations:
+      - baldoni2024a
+
+  - name: catch_oarfish_gene
+    kind: function
+    domain: io
+    module: edgepython.quant_readers
+    r_equivalent: null
+    description: >-
+      edgePython addition. oarfish quantifications summarized to genes.
+    params:
+      - name: parent_dir
+        type: str
+        default: null
+      - name: prefixes
+        type: list
+        default: null
+      - name: tx2gene
+        type: DataFrame
+        default: null
+      - name: remove_version
+        type: bool
+        default: true
+      - name: dgelist
+        type: bool
+        default: true
+      - name: divide
+        type: bool
+        default: true
+      - name: verbose
+        type: bool
+        default: true
+    returns:
+      type: [DGEList, dict]
+    impl_status: complete
+    test_status: tested
+    tests:
+      - test_edger5_parity.py
     citations:
       - baldoni2024a
 
   - name: catch_rsem
     kind: function
     domain: io
-    module: edgepython.io
+    module: edgepython.quant_readers
     r_equivalent: catchRSEM
     description: >-
-      Read RSEM quantification output files into a DGEList.
+      Read RSEM *.isoforms.results files with Gibbs posterior summaries
+      (--calc-pme) and estimate RTA overdispersions.
     params:
+      - name: parent_dir
+        type: str
+        default: null
       - name: files
         type: list
-        required: true
+        default: null
+      - name: ngibbs
+        type: int
+        default: 100
+      - name: dgelist
+        type: bool
+        default: true
+      - name: divide
+        type: bool
+        default: true
+      - name: offset_prior
+        type: bool
+        default: true
       - name: verbose
         type: bool
         default: true
     returns:
-      type: DGEList
+      type: [DGEList, dict]
     impl_status: complete
-    test_status: untested
+    test_status: tested
+    tests:
+      - test_edger5_parity.py
+    citations:
+      - baldoni2024a
+
+  - name: catch_rsem_gene
+    kind: function
+    domain: io
+    module: edgepython.quant_readers
+    r_equivalent: null
+    description: >-
+      edgePython addition. Read RSEM's gene-level *.genes.results files
+      and estimate gene overdispersions from their Gibbs summaries.
+    params:
+      - name: parent_dir
+        type: str
+        default: null
+      - name: files
+        type: list
+        default: null
+      - name: ngibbs
+        type: int
+        default: 100
+      - name: remove_version
+        type: bool
+        default: true
+      - name: dgelist
+        type: bool
+        default: true
+      - name: divide
+        type: bool
+        default: true
+      - name: offset_prior
+        type: bool
+        default: true
+      - name: verbose
+        type: bool
+        default: true
+    returns:
+      type: [DGEList, dict]
+    impl_status: complete
+    test_status: tested
+    tests:
+      - test_edger5_parity.py
+    citations:
+      - baldoni2024a
+
+  - name: split_gencode_tx_names
+    kind: function
+    domain: io
+    module: edgepython.quant_readers
+    r_equivalent: splitGencodeTxNames
+    description: >-
+      Split Gencode transcript names into Ensembl, Havana, name, length
+      and biotype fields.
+    params:
+      - name: x
+        type: list
+        default: null
+      - name: remove_version
+        type: bool
+        default: true
+    returns:
+      type: [DGEList, dict]
+    impl_status: complete
+    test_status: tested
+    tests:
+      - test_edger5_parity.py
+
+  - name: collapse_gencode_tx2gene
+    kind: function
+    domain: io
+    module: edgepython.quant_readers
+    r_equivalent: collapseGencodeTx2Gene
+    description: >-
+      Collapse split Gencode transcript annotation to genes, with
+      combined transcript types and the number of protein-coding
+      transcripts.
+    params:
+      - name: txann
+        type: DataFrame
+        default: null
+    returns:
+      type: [DGEList, dict]
+    impl_status: complete
+    test_status: tested
+    tests:
+      - test_edger5_parity.py
 
   - name: feature_counts_to_dgelist
     kind: function

@@ -88,7 +88,7 @@ Differential exon and transcript usage testing via `diff_splice` (GLM-based with
 
 ### Quantification Uncertainty
 
-Reading quantification output with bootstrap or Gibbs sampling uncertainty from Salmon (`catch_salmon`), kallisto (`catch_kallisto`), and RSEM (`catch_rsem`). Overdispersion estimates from quantification uncertainty are used for differential transcript expression following the approach of Baldoni et al. (2024).
+Reading quantification output with bootstrap or Gibbs sampling uncertainty from Salmon (`catch_salmon`), kallisto (`catch_kallisto`), lr-kallisto (`catch_lr_kallisto`), oarfish (`catch_oarfish`) and RSEM (`catch_rsem`), each with a gene-level version (`catch_salmon_gene`, `catch_kallisto_gene`, `catch_lr_kallisto_gene`, `catch_oarfish_gene`, `catch_rsem_gene`). Overdispersion estimates from quantification uncertainty are used for differential transcript expression following the approach of Baldoni et al. (2024). Gencode transcript names are unpacked into annotation (`split_gencode_tx_names`, `collapse_gencode_tx2gene`). `dgelist_from_tximport` and `dgelist_from_tximeta` build a DGEList from tximport or tximeta output.
 
 ### I/O
 

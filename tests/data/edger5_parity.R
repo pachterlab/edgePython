@@ -366,6 +366,44 @@ txm <- SummarizedExperiment::SummarizedExperiment(
 out$tximeta <- tx_values(DGEListFromTximeta(txm))
 out$tximeta_zeros <- tx_values(DGEListFromTximeta(txm, remove.zeros = TRUE))
 
+# catch* readers on the simulated quantifier output in quant/ (written by
+# make_quant_files.py). catchSalmonGene and catchKallistoGene are run with
+# verbose = TRUE: with verbose = FALSE and Gencode names they stop with
+# "tx2gene not provided" (the else binds to if(verbose)).
+quiet <- function(expr) { capture.output(r <- suppressMessages(expr)); r }
+catch_values <- function(y) {
+  g <- y$genes
+  list(ids = row.names(g), samples = colnames(y$counts), counts = unname(y$counts),
+       genes = lapply(g, function(x) if (is.numeric(x)) x else as.character(x)),
+       offset_prior = if (is.null(y$offset.prior)) NULL else unname(y$offset.prior),
+       effective_length = if (is.null(y$other$effective.length)) NULL else unname(y$other$effective.length),
+       overdispersion_prior = y$overdispersion.prior, resample_type = y$resample.type,
+       divided = y$divided.counts)
+}
+out$catch_salmon <- catch_values(quiet(catchSalmon("quant/salmon")))
+out$catch_salmon_raw <- catch_values(quiet(catchSalmon("quant/salmon", divide = FALSE, impute.eff.len = FALSE,
+                                                       offset.prior = FALSE)))
+for (gl in c("moderate", "tximport", "simple"))
+  out[[paste0("catch_salmon_gene_", gl)]] <- catch_values(quiet(catchSalmonGene("quant/salmon", gene.length = gl)))
+tx2gene <- read.delim("quant/tx2gene.tsv")
+out$catch_kallisto <- catch_values(quiet(catchKallisto("quant/kallisto")))
+out$catch_kallisto_gene <- catch_values(quiet(catchKallistoGene("quant/kallisto", tx2gene = tx2gene)))
+out$catch_kallisto_gene_simple <- catch_values(quiet(catchKallistoGene("quant/kallisto", tx2gene = tx2gene,
+                                                                       gene.length = "simple")))
+out$catch_oarfish <- catch_values(quiet(catchOarfish("quant/oarfish")))
+out$catch_rsem <- catch_values(quiet(catchRSEM("quant/rsem", ngibbs = 50)))
+sp <- splitGencodeTxNames(read.delim("quant/salmon/s1/quant.sf")$Name)
+out$split_gencode <- as.list(as.data.frame(sp))
+out$split_gencode_version <- splitGencodeTxNames(read.delim("quant/salmon/s1/quant.sf")$Name[1:3],
+                                                 remove.version = FALSE)[, 1:2]
+cg <- collapseGencodeTx2Gene(sp)
+out$collapse_gencode <- list(ids = row.names(cg), GeneName = cg$GeneName, TxTypes = cg$TxTypes, NPCTx = cg$NPCTx)
+
+# lr-kallisto (kallisto quant-tcc --matrix-to-directories) writes standard
+# kallisto sample directories, so edgeR's kallisto readers give references
+out$catch_lr_kallisto <- catch_values(quiet(catchKallisto("quant/lr_kallisto/dirs")))
+out$catch_lr_kallisto_gene <- catch_values(quiet(catchKallistoGene("quant/lr_kallisto/dirs")))
+
 inputs$version <- c(R = as.character(getRversion()),
                     edgeR = as.character(packageVersion("edgeR")),
                     limma = as.character(packageVersion("limma")))

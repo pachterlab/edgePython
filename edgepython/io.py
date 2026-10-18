@@ -12,6 +12,9 @@ import warnings
 import numpy as np
 import pandas as pd
 
+# The catch* readers live in quant_readers; imported here for older code
+from .quant_readers import catch_salmon, catch_kallisto, catch_rsem  # noqa: F401
+
 
 def read_dge(files, path=None, columns=(0, 1), group=None, labels=None, sep='\t'):
     """Read and collate count data files.
@@ -176,80 +179,6 @@ def read_10x(path='.', mtx=None, genes=None, barcodes=None, as_dgelist=True):
     return {'counts': y, 'genes': gene_df, 'samples': samples_df}
 
 
-def catch_salmon(paths, verbose=True):
-    """Read Salmon quantification output.
-
-    Parameters
-    ----------
-    paths : list of str
-        Paths to Salmon output directories.
-    verbose : bool
-        Print progress.
-
-    Returns
-    -------
-    dict with counts, annotation, and samples.
-    """
-    return _catch_quant(paths, tool='salmon', verbose=verbose)
-
-
-def catch_kallisto(paths, verbose=True):
-    """Read kallisto quantification output.
-
-    Parameters
-    ----------
-    paths : list of str
-        Paths to kallisto output directories.
-    verbose : bool
-        Print progress.
-
-    Returns
-    -------
-    dict with counts, annotation, and samples.
-    """
-    return _catch_quant(paths, tool='kallisto', verbose=verbose)
-
-
-def catch_rsem(files, verbose=True):
-    """Read RSEM quantification output.
-
-    Parameters
-    ----------
-    files : list of str
-        RSEM output files.
-    verbose : bool
-        Print progress.
-
-    Returns
-    -------
-    dict with counts and annotation.
-    """
-    all_data = []
-    gene_ids = None
-
-    for f in files:
-        df = pd.read_csv(f, sep='\t')
-        if 'expected_count' in df.columns:
-            count_col = 'expected_count'
-        elif 'FPKM' in df.columns:
-            count_col = 'FPKM'
-        else:
-            count_col = df.columns[1]
-
-        if gene_ids is None:
-            gene_ids = df.iloc[:, 0].values
-        all_data.append(df[count_col].values)
-
-    counts = np.column_stack(all_data)
-    labels = [os.path.splitext(os.path.basename(f))[0] for f in files]
-
-    return {
-        'counts': counts,
-        'annotation': pd.DataFrame({'GeneID': gene_ids}),
-        'samples': pd.DataFrame({'files': files}, index=labels)
-    }
-
-
 def feature_counts_to_dgelist(files):
     """Convert featureCounts output to DGEList.
 
@@ -290,59 +219,6 @@ def feature_counts_to_dgelist(files):
 
     counts = np.column_stack(all_counts)
     return make_dgelist(counts, genes=gene_info)
-
-
-def _catch_quant(paths, tool='salmon', verbose=True):
-    """Internal function to read Salmon/kallisto output (legacy)."""
-    all_data = []
-    gene_ids = None
-    labels = []
-
-    for p in paths:
-        label = os.path.basename(os.path.normpath(p))
-        labels.append(label)
-
-        if tool == 'salmon':
-            quant_file = os.path.join(p, 'quant.sf')
-        else:
-            quant_file = os.path.join(p, 'abundance.tsv')
-
-        if not os.path.exists(quant_file):
-            raise FileNotFoundError(f"Cannot find {quant_file}")
-
-        df = pd.read_csv(quant_file, sep='\t')
-
-        if tool == 'salmon':
-            count_col = 'NumReads'
-            id_col = 'Name'
-            length_col = 'EffectiveLength'
-        else:
-            count_col = 'est_counts'
-            id_col = 'target_id'
-            length_col = 'eff_length'
-
-        if gene_ids is None:
-            gene_ids = df[id_col].values
-            if length_col in df.columns:
-                eff_length = df[length_col].values
-            else:
-                eff_length = None
-
-        all_data.append(df[count_col].values)
-
-        if verbose:
-            print(f"Reading {label}...")
-
-    counts = np.column_stack(all_data)
-    annotation = pd.DataFrame({'GeneID': gene_ids})
-    if eff_length is not None:
-        annotation['Length'] = eff_length
-
-    return {
-        'counts': counts,
-        'annotation': annotation,
-        'samples': pd.DataFrame({'files': paths}, index=labels)
-    }
 
 
 # =====================================================================
