@@ -105,7 +105,9 @@ def _subset_matrix_or_df(x, i=None, j=None):
     if isinstance(x, np.ndarray):
         if x.ndim == 2:
             if i is not None and j is not None:
-                return x[np.ix_(np.atleast_1d(i), np.atleast_1d(j))] if not isinstance(i, slice) else x[i, :][:, j]
+                if isinstance(i, slice) or isinstance(j, slice):
+                    return x[i, :][:, j]
+                return x[np.ix_(np.atleast_1d(i), np.atleast_1d(j))]
             elif i is not None:
                 return x[i] if isinstance(i, slice) else x[np.atleast_1d(i)]
             elif j is not None:

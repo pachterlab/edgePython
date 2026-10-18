@@ -684,3 +684,88 @@ def test_glm_lrt_on_a_matrix_fit_matches_edger():
 
 def test_norm_lib_sizes_is_calc_norm_factors():
     assert ep.norm_lib_sizes is ep.calc_norm_factors
+
+
+# DGEListFromTximport and DGEListFromTximeta
+
+TX_COUNTS = _as_array(INPUTS["tx_counts"])
+TX_LENGTH = _as_array(INPUTS["tx_length"])
+TX_INFREPS = list(_as_array(INPUTS["tx_infreps"]))
+
+
+def _txi(**kwargs):
+    return {"counts": TX_COUNTS, "length": TX_LENGTH, "countsFromAbundance": "no",
+            "infReps": TX_INFREPS, **kwargs}
+
+
+def _assert_tx_dgelist(y, case):
+    # R's list(x = NULL) keeps x, written as {}: those are absent
+    expected = {k: v for k, v in EDGER[case].items() if v != {}}
+    _assert_close(np.asarray(y["counts"], dtype=float), _as_array(expected["counts"]), rtol=1e-13)
+    for col in ("AveLength", "Max2MinLength", "Overdispersion"):
+        if col in expected:
+            _assert_close(y["genes"][col], _as_array(expected[col]), rtol=1e-12)
+        else:
+            assert col not in y["genes"]
+    _assert_close(y["samples"]["lib.size"], _as_array(expected["lib_size"]), rtol=1e-13)
+    if "offset_prior" in expected:
+        _assert_close(y["offset.prior"], _as_array(expected["offset_prior"]), rtol=1e-12, atol=1e-14)
+    else:
+        assert y.get("offset.prior") is None
+
+
+def test_dgelist_from_tximport_matches_edger():
+    y = ep.dgelist_from_tximport(_txi())
+    _assert_tx_dgelist(y, "tximport")
+    assert y["divided.counts"] is True and y["tximport.counts"] == "raw"
+    y = ep.dgelist_from_tximport(_txi(), divide=False, remove_zeros=True)
+    _assert_tx_dgelist(y, "tximport_undivided_zeros")
+    assert y["divided.counts"] is False
+    y = ep.dgelist_from_tximport(_txi(countsFromAbundance="lengthScaledTPM", infReps=None))
+    _assert_tx_dgelist(y, "tximport_scaled")
+    # No replicates: nothing to divide by
+    assert y["divided.counts"] is False and y["tximport.counts"] == "lengthScaledTPM"
+
+
+def _txm():
+    import pandas as pd
+    assays = {"counts": TX_COUNTS, "length": TX_LENGTH}
+    for k in range(5):
+        assays[f"infRep{k + 1}"] = np.column_stack([b[:, k] for b in TX_INFREPS])
+    return {"assays": assays, "metadata": {"countsFromAbundance": "no"},
+            "rowData": pd.DataFrame({"gene_id": [f"g{i + 1}" for i in range(100)]})}
+
+
+def test_dgelist_from_tximeta_matches_edger():
+    y = ep.dgelist_from_tximeta(_txm())
+    _assert_tx_dgelist(y, "tximeta")
+    assert list(y["genes"]["gene_id"][:2]) == ["g1", "g2"]
+    _assert_tx_dgelist(ep.dgelist_from_tximeta(_txm(), remove_zeros=True), "tximeta_zeros")
+
+
+def test_dgelist_from_tximeta_reads_anndata():
+    anndata = pytest.importorskip("anndata")
+    txm = _txm()
+    adata = anndata.AnnData(X=txm["assays"]["counts"].T, var=txm["rowData"].set_index("gene_id", drop=False),
+                            layers={k: v.T for k, v in txm["assays"].items() if k != "counts"},
+                            uns={"countsFromAbundance": "no"})
+    y = ep.dgelist_from_tximeta(adata)
+    _assert_tx_dgelist(y, "tximeta")
+
+
+def test_dgelist_from_tximport_checks_components():
+    with pytest.raises(ValueError, match="countsFromAbundance"):
+        ep.dgelist_from_tximport({"counts": TX_COUNTS, "length": TX_LENGTH})
+
+
+@pytest.mark.parametrize("key", [np.array([1, 3, 50]), np.arange(300) > 280, [0, 2],
+                                 (np.array([1, 3]), slice(None)), ([1, 2], [0, 3])])
+def test_dgelist_subsetting_with_index_arrays(key):
+    dge = _offset_prior_dgelist()
+    dge["weights"] = WEIGHTS
+    sub = dge[key]
+    i, j = key if isinstance(key, tuple) else (key, slice(None))
+    i = np.flatnonzero(i) if np.asarray(i).dtype == bool else np.asarray(i)
+    for k in ("counts", "offset.prior", "weights"):
+        np.testing.assert_array_equal(sub[k], np.asarray(dge[k])[i][:, j])
+    assert sub["genes"].shape[0] == len(i)

@@ -76,6 +76,8 @@ from .io import (
     feature_counts_to_dgelist,
     read_bismark2dge,
     seurat_to_pb,
+    dgelist_from_tximport,
+    dgelist_from_tximeta,
 )
 
 # --- Visualization ---

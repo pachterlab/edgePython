@@ -3,7 +3,8 @@
 I/O functions for edgePython.
 
 Port of edgeR's readDGE, read10X, featureCountsToMatrix,
-catchSalmon, catchKallisto, catchRSEM, catchOarfish.
+catchSalmon, catchKallisto, catchRSEM, catchOarfish, DGEListFromTximport,
+DGEListFromTximeta.
 """
 
 import os
@@ -1387,6 +1388,202 @@ def read_data(
 # =====================================================================
 # Bismark methylation coverage
 # =====================================================================
+
+# =====================================================================
+# DGEList from tximport / tximeta output
+# =====================================================================
+
+def _tx_length_annotation(length):
+    """Log lengths, AveLength and Max2MinLength from a genes x samples
+    matrix of effective lengths."""
+    ltxl = np.log(np.asarray(length, dtype=np.float64))
+    return ltxl, np.exp(ltxl.mean(axis=1)), np.exp(ltxl.max(axis=1) - ltxl.min(axis=1))
+
+
+def _dgelist_from_tx(counts, ltxl, genes, overdisp, counts_from_abundance,
+                     samples, group, divide):
+    """Shared end of DGEListFromTximport and DGEListFromTximeta."""
+    from .dgelist import make_dgelist
+
+    if divide:
+        if overdisp is not None:
+            counts = counts / overdisp[:, np.newaxis]
+        else:
+            divide = False
+    y = make_dgelist(counts, samples=samples, group=group, genes=genes, remove_zeros=False)
+    y['divided.counts'] = divide
+    if counts_from_abundance == 'no':
+        y['tximport.counts'] = 'raw'
+        y['offset.prior'] = ltxl - ltxl.mean(axis=1, keepdims=True)
+    else:
+        y['tximport.counts'] = counts_from_abundance
+    return y
+
+
+def _row_names(x):
+    return x.index if isinstance(x, pd.DataFrame) else None
+
+
+def dgelist_from_tximport(txi, samples=None, group=None, genes=None,
+                          remove_zeros=False, divide=True):
+    """Create a DGEList from tximport output.
+
+    Port of edgeR's DGEListFromTximport().
+
+    Parameters
+    ----------
+    txi : dict
+        tximport-style result with 'counts' and 'length' (genes x samples
+        arrays or DataFrames), 'countsFromAbundance' ('no', 'scaledTPM',
+        'lengthScaledTPM' or 'dtuScaledTPM') and optionally 'infReps', a
+        list with one genes x replicates array of inferential replicates
+        per sample.
+    samples : DataFrame, optional
+        Sample annotation.
+    group : array-like, optional
+        Group factor.
+    genes : DataFrame, optional
+        Gene annotation, one row per gene.
+    remove_zeros : bool
+        Remove genes with all-zero counts.
+    divide : bool
+        Divide the counts by the RTA overdispersions estimated from the
+        inferential replicates, when there are any.
+
+    Returns
+    -------
+    DGEList with genes AveLength, Max2MinLength and (with inferential
+    replicates) Overdispersion. With countsFromAbundance 'no', the
+    centred log effective lengths are stored as offset.prior.
+    """
+    missing = [k for k in ('counts', 'length', 'countsFromAbundance') if k not in txi]
+    if missing:
+        raise ValueError(f"Component(s) {','.join(missing)} not found in txi")
+    ids = _row_names(txi['counts'])
+    counts = np.asarray(txi['counts'], dtype=np.float64)
+    ngenes, nsamples = counts.shape
+
+    ltxl, ave_length, max2min = _tx_length_annotation(txi['length'])
+    if genes is None:
+        genes = pd.DataFrame({'AveLength': ave_length, 'Max2MinLength': max2min}, index=ids)
+    else:
+        genes = pd.DataFrame(genes).copy()
+        if genes.shape[0] != ngenes:
+            raise ValueError("nrow(genes) is different from nrow(txi['counts'])")
+        genes['AveLength'] = ave_length
+        genes['Max2MinLength'] = max2min
+
+    overdisp = None
+    if txi.get('infReps') is not None:
+        overdisp = np.zeros(ngenes)
+        df_arr = np.zeros(ngenes)
+        for boot in txi['infReps']:
+            _accumulate_overdispersion(np.asarray(boot, dtype=np.float64), overdisp, df_arr)
+        overdisp, _ = _estimate_overdispersion(overdisp, df_arr)
+        genes['Overdispersion'] = overdisp
+
+    if ids is not None:
+        counts = pd.DataFrame(counts, index=ids, columns=txi['counts'].columns)
+    y = _dgelist_from_tx(counts, ltxl, genes, overdisp, txi['countsFromAbundance'],
+                         samples, group, divide)
+    if remove_zeros:
+        keep = np.asarray(y['counts'], dtype=np.float64).mean(axis=1) >= 1e-6
+        if not np.all(keep):
+            y = y[keep]
+    return y
+
+
+def dgelist_from_tximeta(txm, samples=None, group=None, remove_zeros=False, divide=True):
+    """Create a DGEList from tximeta output.
+
+    Port of edgeR's DGEListFromTximeta().
+
+    Parameters
+    ----------
+    txm : dict or AnnData
+        A SummarizedExperiment-like object: a dict with 'assays' (a dict
+        of genes x samples arrays with 'counts', 'length' and optionally
+        'infRep1', 'infRep2', ...), 'rowData' (gene annotation DataFrame,
+        optional) and 'metadata' (dict, optional, with
+        'countsFromAbundance'). An AnnData (samples x genes) is read the
+        same way from its layers (counts may be in X), var and uns.
+    samples, group : optional
+        Sample annotation and group factor.
+    remove_zeros : bool
+        Remove genes with all-zero counts before anything is computed.
+    divide : bool
+        Divide the counts by the RTA overdispersions, when there are
+        inferential replicates.
+
+    Returns
+    -------
+    DGEList, as from dgelist_from_tximport, with the row annotation of txm
+    as genes.
+    """
+    if hasattr(txm, 'layers') and hasattr(txm, 'var'):
+        assays = {k: np.asarray(v.toarray() if hasattr(v, 'toarray') else v).T
+                  for k, v in txm.layers.items()}
+        if 'counts' not in assays and txm.X is not None:
+            x = txm.X
+            assays['counts'] = np.asarray(x.toarray() if hasattr(x, 'toarray') else x).T
+        row_data = txm.var.copy()
+        metadata = dict(txm.uns)
+    else:
+        assays = txm.get('assays', {})
+        row_data = txm.get('rowData', txm.get('rowRanges'))
+        metadata = txm.get('metadata') or {}
+    if 'counts' not in assays:
+        raise ValueError("txm object doesn't contain counts assay")
+    if 'length' not in assays:
+        raise ValueError("txm object doesn't contain length assay")
+
+    counts = np.asarray(assays['counts'], dtype=np.float64)
+    ngenes = counts.shape[0]
+    ids = _row_names(assays['counts'])
+    if row_data is None:
+        row_data = pd.DataFrame(index=ids if ids is not None else range(ngenes))
+    genes = pd.DataFrame(row_data).copy()
+    if ids is None and not isinstance(genes.index, pd.RangeIndex):
+        ids = genes.index
+    rep_names = [k for k in assays if 'infRep' in k]
+    keep = np.ones(ngenes, dtype=bool)
+    if remove_zeros:
+        keep = counts.mean(axis=1) >= 1e-6
+    counts = counts[keep]
+    genes = genes.iloc[np.flatnonzero(keep)]
+    if 'gene_id' in genes.columns:
+        genes['gene_id'] = genes['gene_id'].astype(str)
+
+    ltxl, ave_length, max2min = _tx_length_annotation(np.asarray(assays['length'])[keep])
+    genes['AveLength'] = ave_length
+    genes['Max2MinLength'] = max2min
+
+    overdisp = None
+    if rep_names:
+        # Means and variances over the replicates by Welford's algorithm
+        reps = [np.asarray(assays[k], dtype=np.float64)[keep] for k in rep_names]
+        n = 1
+        M = reps[0].copy()
+        V = np.zeros_like(M)
+        for r in reps[1:]:
+            n += 1
+            delta = r - M
+            M = M + delta / n
+            V = V + delta * (r - M)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            overdisp = np.nansum(V / M, axis=1)
+        df_arr = (n - 1) * np.sum(M > 0, axis=1).astype(np.float64)
+        overdisp, _ = _estimate_overdispersion(overdisp, df_arr)
+        genes['Overdispersion'] = overdisp
+
+    columns = assays['counts'].columns if isinstance(assays['counts'], pd.DataFrame) else None
+    if ids is not None:
+        ids = np.asarray(ids)[keep]
+        genes.index = ids
+        counts = pd.DataFrame(counts, index=ids, columns=columns)
+    return _dgelist_from_tx(counts, ltxl, genes, overdisp, metadata.get('countsFromAbundance'),
+                            samples, group, divide)
+
 
 def read_bismark2dge(files, sample_names=None, verbose=True):
     """Read Bismark methylation coverage files into a DGEList.

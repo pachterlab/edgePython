@@ -340,6 +340,32 @@ out$sample_weights_refit <- glmQLFTest(glmQLFit(dgebs, inputs$additive), coef = 
 lm_fit <- glmFit(counts, inputs$additive, dispersion = dispersion, offset = offset)
 out$lrt_matrix <- as.list(glmLRT(lm_fit, coef = 5)$table[, c("logCPM", "LR", "PValue")])
 
+# DGEListFromTximport and DGEListFromTximeta on simulated tximport output:
+# 100 genes, 4 samples, 5 inferential replicates, all-zero genes and genes
+# with zero replicate means in some samples
+set.seed(21)
+ntx <- 100; ntxs <- 4
+txmu <- rgamma(ntx, 0.7, 0.02); txmu[1:5] <- 0; txmu[6:10] <- 0.05
+inputs$tx_length <- matrix(exp(rnorm(ntx * ntxs, 7, 0.4)), ntx, ntxs)
+inputs$tx_infreps <- lapply(seq_len(ntxs), function(j)
+  matrix(rnbinom(ntx * 5, mu = txmu, size = 5), ntx, 5) + 0)
+inputs$tx_counts <- sapply(inputs$tx_infreps, rowMeans)
+txi <- list(counts = inputs$tx_counts, length = inputs$tx_length, countsFromAbundance = "no",
+            infReps = inputs$tx_infreps)
+tx_values <- function(y) list(counts = unname(y$counts), offset_prior = unname(y$offset.prior),
+  AveLength = y$genes$AveLength, Max2MinLength = y$genes$Max2MinLength,
+  Overdispersion = y$genes$Overdispersion, lib_size = y$samples$lib.size)
+out$tximport <- tx_values(DGEListFromTximport(txi))
+out$tximport_undivided_zeros <- tx_values(DGEListFromTximport(txi, divide = FALSE, remove.zeros = TRUE))
+out$tximport_scaled <- tx_values(DGEListFromTximport(modifyList(txi, list(countsFromAbundance = "lengthScaledTPM", infReps = NULL))))
+txreps <- lapply(1:5, function(k) sapply(inputs$tx_infreps, function(b) b[, k]))
+names(txreps) <- paste0("infRep", 1:5)
+txm <- SummarizedExperiment::SummarizedExperiment(
+  assays = c(list(counts = inputs$tx_counts, length = inputs$tx_length), txreps),
+  rowData = data.frame(gene_id = paste0("g", 1:ntx)), metadata = list(countsFromAbundance = "no"))
+out$tximeta <- tx_values(DGEListFromTximeta(txm))
+out$tximeta_zeros <- tx_values(DGEListFromTximeta(txm, remove.zeros = TRUE))
+
 inputs$version <- c(R = as.character(getRversion()),
                     edgeR = as.character(packageVersion("edgeR")),
                     limma = as.character(packageVersion("limma")))
