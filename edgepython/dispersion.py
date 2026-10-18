@@ -25,6 +25,57 @@ from .dispersion_lowlevel import (
 )
 
 
+def _independent_columns(design, tol=1e-7):
+    """Columns that R's qr() keeps, in order: the first qr()$rank pivots.
+
+    R's default QR (LINPACK dqrdc2) moves a column to the end when its norm,
+    after removing the columns kept before it, falls below tol times its
+    original norm; the other columns keep their order.
+    """
+    keep = []
+    basis = np.zeros((design.shape[0], 0))
+    for j in range(design.shape[1]):
+        col = design[:, j]
+        norm = np.linalg.norm(col)
+        resid = col - basis @ (basis.T @ col)
+        if norm > 0 and np.linalg.norm(resid) > tol * norm:
+            keep.append(j)
+            basis = np.column_stack([basis, resid / np.linalg.norm(resid)])
+    return keep
+
+
+def _apl_grid_by_zero_pattern(grid_dispersions, y, design, offset, weights):
+    """Adjusted profile likelihood on the grid, as in edgeR's estimateDisp.
+
+    edgeR groups genes by which libraries are fitted as exact zeros, drops
+    those libraries, reduces the design to its independent columns, and
+    leaves the APL at zero for groups whose reduced design is saturated.
+    """
+    from .glm_fit import glm_fit
+
+    fit = glm_fit(y, design=design, offset=offset, dispersion=0.05,
+                  prior_count=0)
+    zero_fit = (y < 1e-4) & (np.asarray(fit['fitted.values']) < 1e-4)
+    l0 = np.zeros((y.shape[0], len(grid_dispersions)))
+    patterns, group = np.unique(zero_fit, axis=0, return_inverse=True)
+    for k, pattern in enumerate(patterns):
+        nonzero = ~pattern
+        if not np.any(nonzero):
+            continue
+        redesign = design
+        if not np.all(nonzero):
+            redesign = design[nonzero]
+            redesign = redesign[:, _independent_columns(redesign)]
+            if redesign.shape[0] == redesign.shape[1]:
+                continue
+        rows = np.flatnonzero(group.reshape(-1) == k)
+        l0[rows] = adjusted_profile_lik_grid(
+            grid_dispersions, y[np.ix_(rows, nonzero)], redesign,
+            offset[np.ix_(rows, nonzero)],
+            weights=weights[np.ix_(rows, nonzero)])
+    return l0
+
+
 def estimate_disp(y, design=None, group=None, lib_size=None, offset=None,
                   prior_df=None, trend_method='locfit', tagwise=True,
                   span=None, legacy_span=False, min_row_sum=5,
@@ -235,9 +286,8 @@ def estimate_disp(y, design=None, group=None, lib_size=None, offset=None,
                     'trended.dispersion': np.nan,
                     'tagwise.dispersion': np.nan}
 
-        # Compute APL on grid for all genes (fast batch)
-        l0 = adjusted_profile_lik_grid(
-            spline_disp, sely, design, seloffset, weights=selweights)
+        l0 = _apl_grid_by_zero_pattern(
+            spline_disp, sely, design, seloffset, selweights)
 
     # Calculate common dispersion
     overall = maximize_interpolant(spline_pts, np.sum(l0, axis=0).reshape(1, -1))
