@@ -91,6 +91,26 @@ for (robust in c(FALSE, TRUE)) {
     list(var_prior = s$var.prior, df_prior = s$df.prior, var_post = s$var.post)
 }
 
+# glmQLFTest with fold-change thresholds (TREAT, UPSHOT by default), on
+# default and legacy fits, for coefficients and contrasts
+ftest_values <- function(res) list(logFC = as.matrix(res$table[, grep("^logFC", names(res$table))]),
+                                   F = res$table$F, pvalue = res$table$PValue,
+                                   df_total = res$df.total)
+fit_new <- glmQLFit(dge, inputs$additive, robust = TRUE)
+fit_legacy <- glmQLFit(dge, inputs$additive, robust = TRUE, legacy = TRUE)
+lfc <- log2(1.5)
+inputs$contrast2 <- cbind(c(0, 0, 0, 1, 0), c(0, 0, 0, 1, -1))
+out$ftest_new <- ftest_values(glmQLFTest(fit_new, coef = 5))
+out$ftest_new_upshot <- ftest_values(glmQLFTest(fit_new, coef = 5, lfc = lfc))
+out$ftest_new_treat <- ftest_values(glmQLFTest(fit_new, coef = 5, lfc = lfc, upshot = FALSE))
+out$ftest_new_fc <- ftest_values(glmQLFTest(fit_new, coef = 5, fc = 1.5))
+out$ftest_new_contrast <- ftest_values(glmQLFTest(fit_new, contrast = c(0, 0, 0, 1, -1), lfc = lfc))
+out$ftest_new_twocoef <- ftest_values(glmQLFTest(fit_new, coef = 4:5, lfc = lfc))
+out$ftest_new_twolfc <- ftest_values(glmQLFTest(fit_new, coef = 4:5, lfc = c(0.3, 0.8), upshot = FALSE))
+out$ftest_new_contrast2 <- ftest_values(glmQLFTest(fit_new, contrast = inputs$contrast2, lfc = lfc))
+out$ftest_legacy <- ftest_values(glmQLFTest(fit_legacy, coef = 5))
+out$ftest_legacy_upshot <- ftest_values(glmQLFTest(fit_legacy, coef = 5, lfc = lfc))
+
 # Unequal-df squeezeVar on enough genes that the loess span is below 1
 set.seed(7)
 inputs$sv2_var <- rchisq(2000, 4) / 4 * exp(rnorm(2000, 0, 0.3))

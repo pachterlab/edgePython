@@ -189,3 +189,66 @@ def test_cox_reid_dispersion_and_adjusted_profile_lik_match_edger():
     for design, key in [("additive", "apl"), ("oneway", "apl_oneway")]:
         _assert_close(adjusted_profile_lik(0.1, COUNTS, _as_array(INPUTS[design]), offset),
                       _edger(key), rtol=1e-9, atol=1e-7)
+
+
+def _ftest_fits():
+    design = _as_array(INPUTS["additive"])
+    dge = ep.estimate_disp(ep.calc_norm_factors(ep.make_dgelist(COUNTS)), design)
+    return (ep.glm_ql_fit(dge, design, robust=True),
+            ep.glm_ql_fit(dge, design, robust=True, legacy=True))
+
+
+FTEST_CASES = {
+    "ftest_new": ("new", {"coef": 4}),
+    "ftest_new_upshot": ("new", {"coef": 4, "lfc": np.log2(1.5)}),
+    "ftest_new_treat": ("new", {"coef": 4, "lfc": np.log2(1.5), "upshot": False}),
+    "ftest_new_fc": ("new", {"coef": 4, "fc": 1.5}),
+    "ftest_new_contrast": ("new", {"contrast": np.array([0, 0, 0, 1, -1.0]), "lfc": np.log2(1.5)}),
+    "ftest_new_twocoef": ("new", {"coef": [3, 4], "lfc": np.log2(1.5)}),
+    "ftest_new_twolfc": ("new", {"coef": [3, 4], "lfc": [0.3, 0.8], "upshot": False}),
+    "ftest_new_contrast2": ("new", {"contrast": "contrast2", "lfc": np.log2(1.5)}),
+    "ftest_legacy": ("legacy", {"coef": 4}),
+    "ftest_legacy_upshot": ("legacy", {"coef": 4, "lfc": np.log2(1.5)}),
+}
+
+
+@pytest.fixture(scope="module")
+def ftest_fits():
+    return dict(zip(["new", "legacy"], _ftest_fits()))
+
+
+@pytest.mark.parametrize("case", list(FTEST_CASES))
+def test_glm_ql_ftest_thresholds_match_edger5(ftest_fits, case):
+    # TREAT and UPSHOT refit the null model with the tested coefficients
+    # pinned at the corners of the threshold box
+    which, kwargs = FTEST_CASES[case]
+    kwargs = dict(kwargs)
+    if isinstance(kwargs.get("contrast"), str):
+        kwargs["contrast"] = _as_array(INPUTS[kwargs["contrast"]])
+    res = ep.glm_ql_ftest(ftest_fits[which], **kwargs)
+    table = res["table"]
+    # Legacy fits use estimate_disp's trended dispersions, which differ from
+    # edgeR's by about 5e-6
+    rtol = 1e-4 if which == "legacy" else 1e-5
+    logfc = table[[c for c in table.columns if c.startswith("logFC")]].to_numpy()
+    _assert_close(logfc.reshape(np.shape(_edger(case, "logFC"))), _edger(case, "logFC"),
+                  rtol=rtol, atol=1e-9)
+    _assert_close(table["F"], _edger(case, "F"), rtol=rtol, atol=1e-7)
+    _assert_close(table["PValue"], _edger(case, "pvalue"), rtol=rtol, atol=1e-12)
+    _assert_close(res["df.total"], _edger(case, "df_total"), rtol=1e-10)
+
+
+def test_contrast_as_coef_matches_limma_with_pivoting():
+    # A rank-2 contrast matrix whose second column is a multiple of the
+    # first: R's qr() moves it to the end
+    from edgepython.limma_port import contrast_as_coef
+    design = _as_array(INPUTS["additive"])
+    contrast = np.zeros((5, 3))
+    contrast[1] = [1, 2, 0]
+    contrast[2] = [0, 0, 1]
+    reform = contrast_as_coef(design, contrast, first=True)
+    assert reform["rank"] == 2 and reform["coef"] == [0, 1]
+    # The reparametrized design reproduces the fitted values of the original
+    beta = np.linalg.lstsq(reform["design"], design @ np.arange(1.0, 6.0), rcond=None)[0]
+    np.testing.assert_allclose(reform["design"] @ beta, design @ np.arange(1.0, 6.0), atol=1e-12)
+    np.testing.assert_allclose(beta[:2], contrast[:, [0, 2]].T @ np.arange(1.0, 6.0), atol=1e-12)

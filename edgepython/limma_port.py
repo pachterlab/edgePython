@@ -988,55 +988,47 @@ def choose_lowess_span(n=1000, small_n=50, min_span=0.3, power=1/3):
 
 
 def contrast_as_coef(design, contrast, first=False):
-    """Reform a design matrix so that a contrast becomes a coefficient.
+    """Reparametrize a design so that contrasts become coefficients.
 
-    Port of limma's contrastAsCoef().
-
-    Parameters
-    ----------
-    design : ndarray
-        Design matrix.
-    contrast : array-like
-        Contrast vector.
-    first : bool
-        If True, put contrast as first column.
-
-    Returns
-    -------
-    dict with 'design' (reformed design) and 'coef' (column index of contrast).
+    Port of limma's contrastAsCoef(). The contrast matrix is QR-decomposed
+    with the column pivoting of R's qr() (LINPACK dqrdc2, tol 1e-7), the
+    design is rotated by Q, and the first rank(contrast) coefficients are
+    back-solved by R so that each equals its contrast. Returns 'design',
+    'coef' (an int for a contrast vector, a list for a matrix) and 'rank'.
     """
+    from scipy.linalg import solve_triangular
     design = np.asarray(design, dtype=np.float64)
-    contrast = np.asarray(contrast, dtype=np.float64).ravel()
+    contrast = np.asarray(contrast, dtype=np.float64)
+    vector = contrast.ndim == 1
+    if vector:
+        contrast = contrast.reshape(-1, 1)
     p = design.shape[1]
-
-    if len(contrast) != p:
+    if contrast.shape[0] != p:
         raise ValueError("Length of contrast must equal number of columns in design")
 
-    # Port of limma's contrastAsCoef: QR decompose contrast, apply Q^T
-    # rotation, then backsolve the contrast coefficient row by R so that
-    # the coefficient directly represents the contrast effect.
-    contrast_mat = contrast.reshape(-1, 1)
-    Q, R_mat = np.linalg.qr(contrast_mat, mode='complete')
-    r_val = R_mat[0, 0]  # scalar R factor (= ±||contrast||)
+    # Columns that R's qr() keeps, in order; negligible ones go to the end
+    keep, basis = [], np.zeros((p, 0))
+    for j in range(contrast.shape[1]):
+        col = contrast[:, j]
+        norm = np.linalg.norm(col)
+        resid = col - basis @ (basis.T @ col)
+        if norm > 0 and np.linalg.norm(resid) >= 1e-7 * norm:
+            keep.append(j)
+            basis = np.column_stack([basis, resid / np.linalg.norm(resid)])
+    r = len(keep)
+    if r == 0:
+        raise ValueError("contrast is all zero")
+    pivot = keep + [j for j in range(contrast.shape[1]) if j not in keep]
 
-    # design_rotated = design @ Q (apply QR rotation)
-    design_rotated = design @ Q
-
-    # Backsolve: divide contrast coefficient column by R to normalize
-    # This makes the coefficient directly represent the logFC
-    ncontrasts = 1
-    design_rotated[:, 0] = design_rotated[:, 0] / r_val
-
-    if first:
-        new_design = design_rotated
-        coef = 0
-    else:
-        # Move contrast column (first) to last
-        cols = list(range(1, p)) + [0]
-        new_design = design_rotated[:, cols]
-        coef = p - 1
-
-    return {'design': new_design, 'coef': coef}
+    Q, R_mat = np.linalg.qr(contrast[:, pivot], mode='complete')
+    design_t = Q.T @ design.T
+    design_t[:r] = solve_triangular(R_mat[:r, :r], design_t[:r])
+    new_design = design_t.T
+    coef = list(range(r))
+    if not first:
+        new_design = np.column_stack([new_design[:, r:], new_design[:, :r]])
+        coef = list(range(p - r, p))
+    return {'design': new_design, 'coef': coef[0] if vector else coef, 'rank': r}
 
 
 def logsumexp(x, y):

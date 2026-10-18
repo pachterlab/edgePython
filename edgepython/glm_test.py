@@ -8,10 +8,10 @@ Port of edgeR's glmLRT, glmQLFTest, glmTreat.
 import numpy as np
 import pandas as pd
 from scipy.stats import chi2, f as f_dist
-from scipy.special import gammaln
+from scipy.special import betainccinv, betaincinv, gammaln
 
 from .expression import ave_log_cpm
-from .glm_levenberg import _expand_compressed
+from .glm_levenberg import _expand_compressed, _expand_dispersion
 from .limma_port import contrast_as_coef
 
 
@@ -122,21 +122,33 @@ def glm_lrt(glmfit, coef=None, contrast=None):
     return result
 
 
-def glm_ql_ftest(glmfit, coef=None, contrast=None, poisson_bound=True):
+def glm_ql_ftest(glmfit, coef=None, contrast=None, fc=1.0, lfc=None,
+                 poisson_bound=True, upshot=True):
     """Quasi-likelihood F-test for GLM coefficients.
 
-    Port of edgeR's glmQLFTest.
+    Port of edgeR 5.0's glmQLFTest. With a fold-change threshold (fc > 1 or
+    lfc > 0) the test is a TREAT test of H0: |logFC| <= lfc; with upshot it
+    is UPSHOT, which averages the TREAT p-value over thresholds between 0
+    and lfc by Gauss quadrature.
 
     Parameters
     ----------
     glmfit : dict (DGEGLM-like)
         Fitted QL GLM from glm_ql_fit().
     coef : int or list, optional
-        Coefficient(s) to test.
+        Coefficient(s) to test (0-based). Defaults to the last.
     contrast : ndarray, optional
-        Contrast vector.
+        Contrast vector, or matrix with one column per contrast.
+    fc : float
+        Fold-change threshold; ignored if lfc is given.
+    lfc : float or array, optional
+        log2 fold-change threshold(s), one per tested coefficient or a
+        single value for all. Defaults to log2(fc).
     poisson_bound : bool
-        Apply Poisson bound.
+        For legacy fits, raise p-values to those of a Poisson LRT for
+        genes whose quasi-dispersion is below the Poisson bound.
+    upshot : bool
+        With a threshold, use UPSHOT rather than plain TREAT.
 
     Returns
     -------
@@ -145,36 +157,70 @@ def glm_ql_ftest(glmfit, coef=None, contrast=None, poisson_bound=True):
     if glmfit.get('s2.post') is None:
         raise ValueError("need to run glm_ql_fit before glm_ql_ftest")
 
-    # Run glmLRT to get the LR statistics
-    out = glm_lrt(glmfit, coef=coef, contrast=contrast)
+    design = np.asarray(glmfit['design'], dtype=np.float64)
+    nbeta = design.shape[1]
+    if nbeta < 2:
+        raise ValueError("Need at least two columns for design, usually the first is the intercept column")
+    coef_names = [f'coef{i}' for i in range(nbeta)]
+    unshrunk = glmfit.get('unshrunk.coefficients')
 
-    # Get adjusted df
+    if contrast is None:
+        if coef is None:
+            coef = nbeta - 1
+        coef = list(dict.fromkeys(np.atleast_1d(coef).tolist()))
+        coef_name = [coef_names[c] for c in coef]
+        logFC = glmfit['coefficients'][:, coef] / np.log(2)
+        logFCt = logFC if unshrunk is None else np.asarray(unshrunk)[:, coef] / np.log(2)
+        test_coef = coef
+        logfc_names = coef_name
+    else:
+        contrast = np.asarray(contrast, dtype=np.float64)
+        contrast_mat = contrast.reshape(-1, 1) if contrast.ndim == 1 else contrast
+        reform = contrast_as_coef(design, contrast_mat, first=True)
+        test_coef = reform['coef']
+        design = reform['design']
+        if len(test_coef) > 1:
+            coef_name = f"LR test on {len(test_coef)} degrees of freedom"
+        else:
+            c = contrast_mat[:, 0]
+            coef_name = " ".join(f"{c[j]:g}*{coef_names[j]}" for j in range(nbeta) if c[j] != 0)
+        logFC = (glmfit['coefficients'] @ contrast_mat) / np.log(2)
+        logFCt = logFC if unshrunk is None else (np.asarray(unshrunk) @ contrast_mat) / np.log(2)
+        logfc_names = [str(j + 1) for j in range(contrast_mat.shape[1])]
+    ncoef = len(test_coef)
+
+    if lfc is None:
+        lfc = np.log2(fc)
+    lfc = np.atleast_1d(np.asarray(lfc, dtype=np.float64))
+    if lfc.size == 1:
+        lfc = np.full(ncoef, lfc[0])
+    if np.any(lfc < 0):
+        raise ValueError("lfc should be non-negative")
+    if lfc.size != ncoef:
+        raise ValueError("fc or lfc vector of wrong length")
+
+    # Dispersion used for the fit, scaled by the average quasi-dispersion
+    # for the default (legacy = False) method
+    dispersion = glmfit.get('dispersion')
+    if glmfit.get('average.ql.dispersion') is not None:
+        dispersion = np.asarray(dispersion, dtype=np.float64) / glmfit['average.ql.dispersion']
+
     if glmfit.get('df.residual.zeros') is None:
         df_residual = glmfit.get('df.residual.adj', glmfit['df.residual'])
         poisson_bound = False
     else:
         df_residual = glmfit['df.residual.zeros']
-
     df_residual = np.asarray(df_residual, dtype=np.float64)
-
-    # Compute F-statistic
-    df_test = out['df.test']
-    if np.isscalar(df_test):
-        df_test_val = float(df_test)
-    else:
-        df_test_val = np.asarray(df_test, dtype=np.float64)
-
-    F_stat = out['table']['LR'].values / df_test_val / glmfit['s2.post']
-
     df_prior = np.atleast_1d(np.asarray(glmfit['df.prior'], dtype=np.float64))
-    df_total = df_prior + df_residual
+    df_total = np.minimum(df_prior + df_residual, np.sum(glmfit['df.residual']))
 
-    # Cap df.total
-    df_residual_total = np.sum(glmfit['df.residual'])
-    df_total = np.minimum(df_total, df_residual_total)
-
-    # P-values from F-distribution
-    F_pvalue = f_dist.sf(np.maximum(F_stat, 0), dfn=df_test_val, dfd=df_total)
+    counts = np.asarray(glmfit['counts'], dtype=np.float64)
+    F_stat, F_pvalue = _ql_ftest(
+        counts, glmfit['offset'], dispersion, glmfit.get('weights'), design, test_coef,
+        np.asarray(glmfit['deviance'], dtype=np.float64),
+        np.broadcast_to(np.asarray(glmfit['s2.post'], dtype=np.float64), counts.shape[:1]),
+        np.broadcast_to(df_total, counts.shape[:1]), lfc,
+        np.asarray(logFCt, dtype=np.float64).reshape(counts.shape[0], ncoef), upshot)
 
     # Poisson bound, as in edgeR's glmQLFTest: for genes where
     # s2.post * (1 + dispersion * fitted) < 1 in any library, the p-value is
@@ -199,12 +245,105 @@ def glm_ql_ftest(glmfit, coef=None, contrast=None, poisson_bound=True):
             pois_pvalue = pois_res['table']['PValue'].to_numpy(dtype=np.float64)
             F_pvalue[below] = np.maximum(F_pvalue[below], pois_pvalue)
 
-    # Update output
-    out['table'].drop(columns=['LR'], inplace=True, errors='ignore')
-    out['table']['F'] = F_stat
-    out['table']['PValue'] = F_pvalue
-    out['df.total'] = df_total
+    if ncoef == 1:
+        logfc_cols = {'logFC': np.asarray(logFC).reshape(-1)}
+    else:
+        logfc_cols = {f'logFC.{n}': logFC[:, k] for k, n in enumerate(logfc_names)}
+    table = pd.DataFrame({**logfc_cols, 'logCPM': glmfit['AveLogCPM'],
+                          'F': F_stat, 'PValue': F_pvalue})
 
+    out = dict(glmfit)
+    out.pop('counts', None)
+    if np.any(lfc > 0):
+        out['lfc'] = lfc
+    out['table'] = table
+    out['comparison'] = coef_name
+    out['df.test'] = ncoef
+    out['df.total'] = df_total
+    return out
+
+
+# UPSHOT Gauss quadrature rule: 8 folded nodes on [0, 1] and the centre
+# weight, as in edgeR's ftest.c
+_UPSHOT_NODES = np.array([0.1784842, 0.3512318, 0.5126905, 0.6576712,
+                          0.7815140, 0.8802392, 0.9506755, 0.9905755])
+_UPSHOT_WEIGHTS = np.array([0.1765627, 0.1680041, 0.1540458, 0.1351364,
+                            0.1118839, 0.0850362, 0.0554595, 0.0241483])
+_UPSHOT_CENTRE = 0.08972310
+
+
+def _ql_ftest(counts, offset, dispersion, weights, design, test_coef, deviance,
+              s2_post, df_total, lfc, logFCt, upshot):
+    """QL F-statistics and p-values, with TREAT or UPSHOT thresholds.
+
+    Port of edgeR 5.0's ftest_engine. The null model drops the tested
+    columns. With a threshold, a gene whose |logFC| exceeds lfc * s for a
+    quadrature node s is refitted with the tested coefficients pinned at
+    each corner of the box +/- min(lfc * s, |logFC|), and the smallest of
+    those deviances gives the node's F-test.
+    """
+    from .glm_fit import glm_fit
+    shape = counts.shape
+    ncoef = len(test_coef)
+    keep = [j for j in range(design.shape[1]) if j not in test_coef]
+    design0 = design[:, keep]
+    design1 = design[:, test_coef]
+    offset = _expand_compressed(offset, shape)
+    disp = _expand_dispersion(dispersion, shape)
+    w = None if weights is None else _expand_compressed(weights, shape)
+
+    def null_deviance(rows, off):
+        return glm_fit(counts[rows], design=design0, dispersion=disp[rows], offset=off,
+                       weights=None if w is None else w[rows], prior_count=0)['deviance']
+
+    def ftest(dev0, rows):
+        F = np.maximum(dev0 - deviance[rows], 0) / ncoef / s2_post[rows]
+        return F, f_dist.sf(F, ncoef, df_total[rows])
+
+    all_rows = np.arange(shape[0])
+    F_stat, p_base = ftest(null_deviance(all_rows, offset), all_rows)
+    if not np.any(lfc > 0):
+        return F_stat, p_base
+
+    nodes = _UPSHOT_NODES if upshot else np.array([1.0])
+    pvalue = _UPSHOT_CENTRE * p_base if upshot else None
+    abs_lfc = np.abs(logFCt) * np.log(2)
+    for i, s in enumerate(nodes):
+        node_p = np.ones(shape[0])
+        thr = lfc * s * np.log(2)
+        rows = np.flatnonzero(np.any(abs_lfc > thr, axis=1))
+        if rows.size:
+            pinned = np.minimum(thr, abs_lfc[rows])
+            min_dev = np.full(rows.size, np.inf)
+            for b in range(2 ** ncoef):
+                sign = np.array([2.0 * ((b >> c) & 1) - 1.0 for c in range(ncoef)])
+                off = offset[rows] + (pinned * sign) @ design1.T
+                min_dev = np.minimum(min_dev, null_deviance(rows, off))
+            node_p[rows] = ftest(min_dev, rows)[1]
+        if upshot:
+            pvalue = pvalue + _UPSHOT_WEIGHTS[i] * node_p
+        else:
+            pvalue = (p_base + node_p) / 2
+    return _f_isf(pvalue, ncoef, df_total), pvalue
+
+
+def _f_isf(p, dfn, dfd):
+    """Upper-tail F quantile, qf(p, dfn, dfd, lower.tail = FALSE).
+
+    Inverts the regularized incomplete beta function directly. scipy's
+    f.isf works from 1 - p and returns inf for p below about 1e-17.
+    """
+    p, dfn, dfd = np.broadcast_arrays(np.asarray(p, dtype=np.float64),
+                                      np.asarray(dfn, dtype=np.float64),
+                                      np.asarray(dfd, dtype=np.float64))
+    out = np.empty(p.shape)
+    small = p < 0.5
+    # P(F > x) = I_w(dfd/2, dfn/2) with w = dfd / (dfd + dfn x)
+    w = betaincinv(dfd[small] / 2, dfn[small] / 2, p[small])
+    out[small] = dfd[small] * (1 - w) / (dfn[small] * w)
+    # P(F > x) = 1 - I_u(dfn/2, dfd/2) with u = dfn x / (dfn x + dfd)
+    u = betainccinv(dfn[~small] / 2, dfd[~small] / 2, p[~small])
+    out[~small] = dfd[~small] * u / (dfn[~small] * (1 - u))
     return out
 
 
