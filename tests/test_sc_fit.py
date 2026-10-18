@@ -540,13 +540,16 @@ class TestShrinkScDisp:
                        - (sc_data['nsubjects'] - 1))
         assert fit['df_residual'] == expected_df
 
-    def test_df_prior_positive(self, twogp_fit):
+    def test_df_prior_non_negative(self, twogp_fit):
+        # limma's robust squeezeVar gives outlier genes df.prior = 0, and
+        # does so for two genes here
         fit = self._shrink(twogp_fit)
         df_prior = fit['df_prior_phi']
         if np.isscalar(df_prior):
-            assert df_prior > 0 or np.isinf(df_prior)
+            assert df_prior >= 0
         else:
-            assert np.all(df_prior[np.isfinite(df_prior)] > 0)
+            assert np.all(df_prior[np.isfinite(df_prior)] >= 0)
+            assert np.any(df_prior > 0)
 
     def test_with_covariate(self, twogp_fit):
         fit = self._shrink(twogp_fit)
