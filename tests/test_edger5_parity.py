@@ -493,3 +493,44 @@ def test_filter_by_expr_caps_min_sample_size():
                                   _edger("filter_large_nocap").astype(bool))
     with pytest.warns(UserWarning, match="Ignoring arguments set individually"):
         ep.filter_by_expr(y, group=group, preset="lenient", min_count=5)
+
+
+def _offset_prior_dgelist():
+    import pandas as pd
+    dge = ep.calc_norm_factors(ep.make_dgelist(
+        COUNTS, group=np.repeat(["A", "B", "C"], 3),
+        genes=pd.DataFrame({"AveLength": _as_array(INPUTS["ave_length"])})))
+    dge["offset.prior"] = _as_array(INPUTS["offset_prior"])
+    return dge
+
+
+def test_offset_prior_in_get_offset_cpm_and_rpkm():
+    from edgepython.dgelist import get_offset
+    dge = _offset_prior_dgelist()
+    np.testing.assert_allclose(get_offset(dge), _edger("op_get_offset"), rtol=1e-13)
+    np.testing.assert_allclose(ep.cpm(dge), _edger("op_cpm"), rtol=1e-13)
+    np.testing.assert_allclose(ep.cpm(dge, log=True), _edger("op_cpm_log"), rtol=1e-13)
+    # rpkm finds gene lengths in an AveLength column
+    np.testing.assert_allclose(ep.rpkm(dge), _edger("op_rpkm"), rtol=1e-13)
+    np.testing.assert_allclose(ep.cpm(dge[10:60, 1:8]), _edger("op_subset_cpm"), rtol=1e-13)
+    with pytest.warns(UserWarning, match="offset_prior is ignored"):
+        ep.cpm(COUNTS, offset=np.log(COUNTS.sum(axis=0)), offset_prior=_as_array(INPUTS["offset_prior"]))
+
+
+def test_models_from_dgelist_use_offset_prior():
+    design = _as_array(INPUTS["additive"])
+    e = ep.estimate_disp(_offset_prior_dgelist(), design)
+    assert e["common.dispersion"] == pytest.approx(_edger("op_disp", "common")[0], rel=1e-10)
+    _assert_close(e["trended.dispersion"], _edger("op_disp", "trended"), rtol=1e-10)
+    res = ep.glm_ql_ftest(ep.glm_ql_fit(e, design), coef=4)
+    _assert_close(res["table"]["PValue"], _edger("op_qlftest"), rtol=1e-7, atol=1e-12)
+
+
+def test_cbind_and_rbind_keep_offset_prior():
+    # edgeR's cbind/rbind keep only the first object's offset.prior
+    from edgepython.classes import cbind_dgelist, rbind_dgelist
+    dge = _offset_prior_dgelist()
+    both = cbind_dgelist(dge[:, :4], dge[:, 4:])
+    np.testing.assert_array_equal(both["offset.prior"], dge["offset.prior"])
+    both = rbind_dgelist(dge[:100], dge[100:])
+    np.testing.assert_array_equal(both["offset.prior"], dge["offset.prior"])

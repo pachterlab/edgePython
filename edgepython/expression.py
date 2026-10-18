@@ -6,12 +6,13 @@ Port of edgeR's cpm, rpkm, tpm, aveLogCPM, cpmByGroup, rpkmByGroup.
 """
 
 import numpy as np
+from .compressed_matrix import CompressedMatrix
 import warnings
 from .utils import expand_as_matrix, add_prior_count
 
 
 def cpm(y, lib_size=None, offset=None, log=False, prior_count=2,
-        normalized_lib_sizes=True):
+        normalized_lib_sizes=True, offset_prior=None):
     """Counts per million.
 
     Port of edgeR's cpm().
@@ -30,30 +31,33 @@ def cpm(y, lib_size=None, offset=None, log=False, prior_count=2,
         Prior count for log transformation.
     normalized_lib_sizes : bool
         Use normalized library sizes (for DGEList input).
+    offset_prior : array-like, optional
+        Genes x samples log-scale adjustments to the library sizes, which
+        become exp(log(lib_size) + offset_prior). A DGEList's
+        offset.prior is used automatically. Ignored if offset is given.
 
     Returns
     -------
     ndarray of CPM values.
     """
-    # DGEList input
+    # DGEList input. As in edgeR 5.0, a stored offset is used as is;
+    # otherwise the library sizes are combined with any offset.prior.
     if isinstance(y, dict) and 'counts' in y:
         dge = y
-        ls = dge['samples']['lib.size'].values
-
         if dge.get('offset') is not None:
-            ls = None
-            offset = dge['offset']
-        elif normalized_lib_sizes:
+            return _cpm_default(dge['counts'], offset=dge['offset'], log=log,
+                                prior_count=prior_count)
+        ls = dge['samples']['lib.size'].values
+        if normalized_lib_sizes:
             ls = ls * dge['samples']['norm.factors'].values
-
-        return _cpm_default(dge['counts'], lib_size=ls, offset=offset,
+        return _cpm_default(dge['counts'], lib_size=ls, offset_prior=dge.get('offset.prior'),
                             log=log, prior_count=prior_count)
 
-    return _cpm_default(y, lib_size=lib_size, offset=offset,
+    return _cpm_default(y, lib_size=lib_size, offset=offset, offset_prior=offset_prior,
                         log=log, prior_count=prior_count)
 
 
-def _cpm_default(y, lib_size=None, offset=None, log=False, prior_count=2):
+def _cpm_default(y, lib_size=None, offset=None, log=False, prior_count=2, offset_prior=None):
     """Core CPM calculation."""
     y = np.asarray(y, dtype=np.float64)
     ymin = np.nanmin(y)
@@ -67,30 +71,41 @@ def _cpm_default(y, lib_size=None, offset=None, log=False, prior_count=2):
     if y.size == 0:
         return y.copy()
 
+    # Library sizes as in edgeR 5.0's cpm.default: from the offset if given,
+    # otherwise lib_size (default column sums), times exp(offset_prior) if
+    # given, which makes them genes x samples
     if offset is not None:
+        if isinstance(offset, CompressedMatrix):
+            offset = offset.as_matrix()
         offset = np.asarray(offset, dtype=np.float64)
         if offset.ndim == 2:
             if offset.shape != y.shape:
-                raise ValueError("dimensions not consistent between counts and offset")
-        else:
-            if len(offset) != y.shape[1]:
-                raise ValueError("Length of offset differs from number of libraries")
-        lib_size = np.exp(offset) if offset.ndim == 1 else None
-        if offset.ndim == 2:
-            lib_size = np.exp(offset)
+                raise ValueError("counts and offset must have equal dimensions")
+        elif len(offset) != y.shape[1]:
+            raise ValueError("if offset is a vector, its length must be the number of samples")
+        if lib_size is not None:
+            warnings.warn("lib_size is ignored in the presence of offset")
+        if offset_prior is not None:
+            warnings.warn("offset_prior is ignored in the presence of offset")
+        lib_size = np.exp(offset)
     else:
         if lib_size is None:
             lib_size = y.sum(axis=0)
+        lib_size = np.asarray(lib_size, dtype=np.float64)
+        if offset_prior is not None:
+            offset_prior = np.asarray(offset_prior, dtype=np.float64)
+            if offset_prior.shape != y.shape:
+                raise ValueError("counts and offset_prior must have equal dimensions.")
+            lib_size = np.exp(np.log(lib_size)[None, :] + offset_prior)
 
     lib_size = np.asarray(lib_size, dtype=np.float64)
-    if lib_size.ndim == 1:
-        if np.any(lib_size <= 0):
-            raise ValueError("library sizes should be greater than zero")
+    if np.any(np.isnan(lib_size)):
+        raise ValueError("NA library sizes not allowed")
+    if np.any(lib_size <= 0):
+        raise ValueError("Library sizes should be greater than zero")
 
     if log:
-        out = add_prior_count(y, lib_size=lib_size if lib_size.ndim == 1 else None,
-                              offset=np.log(lib_size) if lib_size.ndim == 1 else offset,
-                              prior_count=prior_count)
+        out = add_prior_count(y, offset=np.log(lib_size), prior_count=prior_count)
         # As edgeR's calc_cpm_log: (log(y + prior) - log(lib + 2 prior)
         # + log(1e6)) / log(2), NaN where y + prior is not positive
         y_aug = out['y']
@@ -104,8 +119,8 @@ def _cpm_default(y, lib_size=None, offset=None, log=False, prior_count=2):
         return y * 1e6 / (lib_size[np.newaxis, :] if lib_size.ndim == 1 else lib_size)
 
 
-def rpkm(y, gene_length, lib_size=None, offset=None, log=False, prior_count=2,
-         normalized_lib_sizes=True):
+def rpkm(y, gene_length=None, lib_size=None, offset=None, log=False, prior_count=2,
+         normalized_lib_sizes=True, offset_prior=None):
     """Reads per kilobase per million.
 
     Port of edgeR's rpkm().
@@ -114,33 +129,51 @@ def rpkm(y, gene_length, lib_size=None, offset=None, log=False, prior_count=2,
     ----------
     y : array-like or DGEList
         Count matrix or DGEList.
-    gene_length : array-like or str
-        Gene lengths in bp.
-    lib_size, offset, log, prior_count, normalized_lib_sizes :
+    gene_length : array-like or str, optional
+        Gene lengths in bp, or the name of a column of y['genes']. For a
+        DGEList the default is the Length, length or AveLength column, or
+        a single column with 'length' in its name.
+    lib_size, offset, log, prior_count, normalized_lib_sizes, offset_prior :
         As for cpm().
     """
-    # Extract gene_length from DGEList if string
     if isinstance(y, dict) and 'counts' in y:
+        dge = y
+        genes = dge.get('genes')
         if isinstance(gene_length, str):
-            gene_length = y['genes'][gene_length].values
+            if genes is None or gene_length not in genes.columns:
+                raise ValueError("gene_length column not found")
+            gene_length = genes[gene_length].values
         elif gene_length is None:
-            for col in ['Length', 'length']:
-                if col in y.get('genes', {}).columns if y.get('genes') is not None else False:
-                    gene_length = y['genes'][col].values
+            cols = [] if genes is None else list(genes.columns)
+            for col in ['Length', 'length', 'AveLength']:
+                if col in cols:
+                    gene_length = genes[col].values
                     break
-            if gene_length is None:
-                raise ValueError("Gene lengths not found")
+            else:
+                matches = [c for c in cols if 'length' in str(c).lower()]
+                if len(matches) != 1:
+                    raise ValueError("Gene lengths not found")
+                gene_length = genes[matches[0]].values
+        lib = dge['samples']['lib.size'].values
+        offset = dge.get('offset')
+        if offset is not None:
+            off = offset.as_matrix() if isinstance(offset, CompressedMatrix) else np.asarray(offset)
+            if np.min(off) > np.max(np.log(lib)) or np.min(np.log(lib)) > np.max(off):
+                warnings.warn("Offset may not reflect library sizes. Scaling offset may be required.")
+            lib = None
+        elif normalized_lib_sizes:
+            lib = lib * dge['samples']['norm.factors'].values
+        result = _cpm_default(dge['counts'], lib_size=lib, offset=offset,
+                              offset_prior=dge.get('offset.prior'), log=log,
+                              prior_count=prior_count)
+    else:
+        result = _cpm_default(y, lib_size=lib_size, offset=offset, offset_prior=offset_prior,
+                              log=log, prior_count=prior_count)
 
-    gene_length = np.asarray(gene_length, dtype=np.float64)
-    gene_length_kb = gene_length / 1000
-
-    result = cpm(y, lib_size=lib_size, offset=offset, log=log,
-                 prior_count=prior_count, normalized_lib_sizes=normalized_lib_sizes)
-
+    gene_length_kb = np.asarray(gene_length, dtype=np.float64) / 1000
     if log:
         return result - np.log2(gene_length_kb[:, np.newaxis])
-    else:
-        return result / gene_length_kb[:, np.newaxis]
+    return result / gene_length_kb[:, np.newaxis]
 
 
 def tpm(y, effective_tx_length, rta_overdispersion=None, shrunk=False):

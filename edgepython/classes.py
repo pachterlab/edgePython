@@ -157,7 +157,7 @@ class DGEList(_EdgeRBase):
     weights : ndarray or None
     """
 
-    _IJ = {'counts', 'pseudo.counts', 'offset', 'weights'}
+    _IJ = {'counts', 'pseudo.counts', 'offset', 'offset.prior', 'weights'}
     _IX = {'genes'}
     _JX = {'samples'}
     _I = {'AveLogCPM', 'trended.dispersion', 'tagwise.dispersion', 'prior.n', 'prior.df'}
@@ -480,7 +480,7 @@ def cbind_dgelist(*objects):
         out['counts'] = np.hstack([out['counts'], obj['counts']])
         out['samples'] = pd.concat([out['samples'], obj['samples']], ignore_index=False)
 
-        for key in ['offset', 'weights', 'pseudo.counts']:
+        for key in ['offset', 'offset.prior', 'weights', 'pseudo.counts']:
             if key in out and out[key] is not None and key in obj and obj[key] is not None:
                 out[key] = np.hstack([out[key], obj[key]])
 
@@ -505,7 +505,7 @@ def rbind_dgelist(*objects):
         out['counts'] = np.vstack([out['counts'], obj['counts']])
         if 'genes' in out and out['genes'] is not None and 'genes' in obj and obj['genes'] is not None:
             out['genes'] = pd.concat([out['genes'], obj['genes']], ignore_index=False)
-        for key in ['offset', 'weights', 'pseudo.counts']:
+        for key in ['offset', 'offset.prior', 'weights', 'pseudo.counts']:
             if key in out and out[key] is not None and key in obj and obj[key] is not None:
                 out[key] = np.vstack([out[key], obj[key]])
 

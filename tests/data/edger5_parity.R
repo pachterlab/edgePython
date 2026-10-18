@@ -237,6 +237,24 @@ out$filter_large <- keep_values(filterByExpr(inputs$filter_large, group = inputs
 out$filter_large_nocap <- keep_values(filterByExpr(inputs$filter_large, group = inputs$filter_large_group,
                                                    max.n.samples = Inf))
 
+# offset.prior: genewise log adjustments to the library sizes (rows centred,
+# as the catch functions make them), used by getOffset, cpm, rpkm and every
+# model fitted from the DGEList
+set.seed(13)
+op <- matrix(rnorm(ngenes * nlibs, 0, 0.2), ngenes, nlibs)
+inputs$offset_prior <- op - rowMeans(op)
+inputs$ave_length <- 500 + 10 * seq_len(ngenes)
+dgeop <- normLibSizes(DGEList(counts, group = group, genes = data.frame(AveLength = inputs$ave_length)))
+dgeop$offset.prior <- inputs$offset_prior
+out$op_get_offset <- getOffset(dgeop)
+out$op_cpm <- cpm(dgeop)
+out$op_cpm_log <- cpm(dgeop, log = TRUE)
+out$op_rpkm <- rpkm(dgeop)
+eop <- estimateDisp(dgeop, inputs$additive)
+out$op_disp <- list(common = eop$common.dispersion, trended = eop$trended.dispersion)
+out$op_qlftest <- glmQLFTest(glmQLFit(eop, inputs$additive), coef = 5)$table$PValue
+out$op_subset_cpm <- cpm(dgeop[11:60, 2:8])
+
 # Unequal-df squeezeVar on enough genes that the loess span is below 1
 set.seed(7)
 inputs$sv2_var <- rchisq(2000, 4) / 4 * exp(rnorm(2000, 0, 0.3))

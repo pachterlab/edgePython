@@ -267,7 +267,9 @@ def get_dispersion_type(y):
 def get_offset(y):
     """Extract offset vector or matrix from a DGEList.
 
-    Port of edgeR's getOffset. Returns log(lib.size * norm.factors) by default.
+    Port of edgeR's getOffset. Returns the stored offset if any, otherwise
+    log(lib.size * norm.factors), plus offset.prior (genes x samples) if the
+    DGEList has one.
     """
     if y.get('offset') is not None:
         return y['offset']
@@ -283,6 +285,9 @@ def get_offset(y):
     if np.any(~np.isfinite(lib_size)) or np.any(lib_size <= 0):
         raise ValueError("library sizes must be positive finite values")
 
+    # As in edgeR 5.0, a genewise offset.prior is added to the log library sizes
+    if y.get('offset.prior') is not None:
+        return np.asarray(y['offset.prior'], dtype=np.float64) + np.log(lib_size)[None, :]
     return np.log(lib_size)
 
 
