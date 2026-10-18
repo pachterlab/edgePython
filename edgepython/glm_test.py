@@ -45,9 +45,6 @@ def glm_lrt(glmfit, coef=None, contrast=None):
 
     coef_names = [f'coef{i}' for i in range(nbeta)]
 
-    # Q is set to the QR rotation matrix in the contrast branch; used later for warm-start
-    Q = None
-
     # Determine coefficients to test
     if contrast is None:
         if coef is None:
@@ -93,30 +90,13 @@ def glm_lrt(glmfit, coef=None, contrast=None):
     if glmfit.get('average.ql.dispersion') is not None:
         dispersion = np.asarray(dispersion, dtype=np.float64) / glmfit['average.ql.dispersion']
 
-    # Warm-start: when the null design requires Levenberg-Marquardt (i.e. it is
-    # NOT a one-way layout), initialize from the full model's coefficients for
-    # the kept columns.  This cuts LM iterations from ~20 to ~2 for large
-    # (20+ column) designs.  For one-way designs mglm_one_group's Fisher
-    # scoring is used instead, and extreme warm-start values (e.g. near-zero
-    # genes) can cause divergence there — so we leave those cold.
-    from .utils import design_as_factor as _design_as_factor
-    _grp_null = _design_as_factor(design0)
-    _null_is_oneway = len(np.unique(_grp_null)) == design0.shape[1]
-
-    if not _null_is_oneway:
-        coef_full = glmfit.get('unshrunk.coefficients', glmfit['coefficients'])
-        if Q is not None:
-            # Design was QR-rotated; project coefficients into rotated space
-            coef_full = coef_full @ Q
-        start_null = coef_full[:, keep_cols]
-    else:
-        start_null = None
-
+    # As in edgeR, the null model is fitted from edgeR's null starting values.
+    # Starting from the full model's coefficients is not safe: coefficients of
+    # groups that are entirely zero are -1e8.
     fit_null = glm_fit(glmfit['counts'], design=design0,
                        offset=glmfit.get('offset'),
                        weights=glmfit.get('weights'),
-                       dispersion=dispersion, prior_count=0,
-                       start=start_null)
+                       dispersion=dispersion, prior_count=0)
 
     # Likelihood ratio statistic
     LR = fit_null['deviance'] - glmfit['deviance']

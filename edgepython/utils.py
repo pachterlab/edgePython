@@ -63,47 +63,30 @@ def add_prior_count(y, lib_size=None, offset=None, prior_count=1):
         if lib_size is None:
             lib_size = y.sum(axis=0)
         offset = np.log(lib_size)
+    if isinstance(offset, CompressedMatrix):
+        offset = offset.as_matrix()
     offset = np.atleast_1d(np.asarray(offset, dtype=np.float64))
+    libwise_offset = offset.ndim == 1
+    offset_mat = expand_as_matrix(offset, dim=y.shape) if libwise_offset else offset
 
     prior_count = np.atleast_1d(np.asarray(prior_count, dtype=np.float64))
-
-    # Expand offset and prior_count to matrix form
-    if offset.ndim == 1:
-        offset_mat = np.tile(offset, (y.shape[0], 1))
-    else:
-        offset_mat = offset.copy()
-
-    if prior_count.ndim == 0 or prior_count.size == 1:
-        prior_mat = np.full(y.shape, prior_count.ravel()[0])
+    scalar_prior = prior_count.size == 1
+    if scalar_prior:
+        prior_mat = np.full(y.shape, prior_count[0])
     elif prior_count.ndim == 1 and len(prior_count) == y.shape[0]:
         prior_mat = np.tile(prior_count.reshape(-1, 1), (1, y.shape[1]))
     else:
         prior_mat = expand_as_matrix(prior_count, dim=y.shape, byrow=False)
 
-    # Effective library sizes from offset
+    # As in edgeR's compute_offsets: scale each gene's prior by its library
+    # sizes over their mean, add it to the counts, and add twice it to the
+    # library sizes
     lib_size_eff = np.exp(offset_mat)
-
-    # Scale prior counts to be proportional to library size
-    avg_lib = np.mean(lib_size_eff, axis=0) if lib_size_eff.ndim == 2 else np.mean(lib_size_eff)
-    if lib_size_eff.ndim == 2:
-        # prior is scaled by lib_size / mean_lib_size
-        mean_lib = np.mean(lib_size_eff)
-        scaled_prior = prior_mat * lib_size_eff / mean_lib
-    else:
-        scaled_prior = prior_mat
-
+    scaled_prior = prior_mat * lib_size_eff / np.mean(lib_size_eff, axis=1, keepdims=True)
     y_aug = y + scaled_prior
-    offset_aug = np.log(lib_size_eff + 2 * np.mean(scaled_prior, axis=0, keepdims=True) * np.mean(lib_size_eff) / lib_size_eff)
-
-    # Simplified: match edgeR C code behavior
-    # offset_aug = log(lib_size + 2*prior_count_scaled)
-    if offset.ndim == 1:
-        lib = np.exp(offset)
-        pc = prior_count.ravel()[0] if prior_count.size == 1 else np.mean(prior_count)
-        offset_aug = np.log(lib + 2.0 * pc * lib / np.mean(lib))
-        scaled_prior_simple = prior_count.ravel()[0] * lib / np.mean(lib) if prior_count.size == 1 else prior_count.reshape(-1, 1) * lib / np.mean(lib)
-        y_aug = y + (scaled_prior_simple if np.ndim(scaled_prior_simple) == 2 else np.tile(scaled_prior_simple, (y.shape[0], 1)))
-        offset_aug_mat = np.tile(offset_aug, (y.shape[0], 1)) if offset_aug.ndim == 1 else offset_aug
+    offset_aug = np.log(lib_size_eff + 2.0 * scaled_prior)
+    if libwise_offset and scalar_prior:
+        offset_aug = offset_aug[0]
 
     return {'y': y_aug, 'offset': offset_aug}
 
