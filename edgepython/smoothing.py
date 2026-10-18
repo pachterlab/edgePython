@@ -9,184 +9,18 @@ import numpy as np
 from numba import njit, prange
 
 
-
-@njit(cache=True)
-def _locfit_degree1_point(i, x_sorted, y_sorted, w_sorted, n, ncols, nn, result_sorted):
-    """Compute locfit degree=1 for a single point i."""
-    lo = i
-    hi = i + 1
-    while hi - lo < nn:
-        can_left = lo > 0
-        can_right = hi < n
-        if can_left and can_right:
-            if x_sorted[i] - x_sorted[lo - 1] <= x_sorted[hi] - x_sorted[i]:
-                lo -= 1
-            else:
-                hi += 1
-        elif can_left:
-            lo -= 1
-        elif can_right:
-            hi += 1
-        else:
-            break
-
-    h = 0.0
-    for k in range(lo, hi):
-        d = abs(x_sorted[k] - x_sorted[i])
-        if d > h:
-            h = d
-    h += 1e-10
-
-    sum_w = 0.0
-    sum_w_dx = 0.0
-    sum_w_dx2 = 0.0
-
-    for k in range(lo, hi):
-        u = abs(x_sorted[k] - x_sorted[i]) / h
-        if u >= 1.0:
-            wk = 0.0
-        else:
-            t = 1.0 - u * u * u
-            wk = t * t * t
-        wk *= w_sorted[k]
-        dx = x_sorted[k] - x_sorted[i]
-        sum_w += wk
-        sum_w_dx += wk * dx
-        sum_w_dx2 += wk * dx * dx
-
-    det = sum_w * sum_w_dx2 - sum_w_dx * sum_w_dx
-    if abs(det) < 1e-300:
-        for j in range(ncols):
-            result_sorted[i, j] = y_sorted[i, j]
-    else:
-        for j in range(ncols):
-            rhs0 = 0.0
-            rhs1 = 0.0
-            for k in range(lo, hi):
-                u = abs(x_sorted[k] - x_sorted[i]) / h
-                if u >= 1.0:
-                    wk = 0.0
-                else:
-                    t2 = 1.0 - u * u * u
-                    wk = t2 * t2 * t2
-                wk *= w_sorted[k]
-                dx = x_sorted[k] - x_sorted[i]
-                rhs0 += wk * y_sorted[k, j]
-                rhs1 += wk * dx * y_sorted[k, j]
-            result_sorted[i, j] = (sum_w_dx2 * rhs0 - sum_w_dx * rhs1) / det
-
-
-@njit(cache=True, parallel=True)
-def _locfit_degree1_kernel(x_sorted, y_sorted, w_sorted, n, ncols, nn, result_sorted):
-    """Numba kernel for locfit degree=1 (local linear regression) with nearest-neighbor bandwidth."""
-    for i in prange(n):
-        idx = np.int64(i)
-        _locfit_degree1_point(idx, x_sorted, y_sorted, w_sorted, n, ncols, nn, result_sorted)
-
-
-@njit(cache=True)
-def _locfit_degree1_grid_point(i, x_eval, x_sorted, y_sorted, w_sorted, n, ncols, nn, result_grid):
-    """Compute locfit degree=1 at eval point x_eval[i] using sorted data."""
-    xv = x_eval[i]
-    # Binary search to find insertion point in x_sorted
-    lo_bs = 0
-    hi_bs = n
-    while lo_bs < hi_bs:
-        mid = (lo_bs + hi_bs) // 2
-        if x_sorted[mid] < xv:
-            lo_bs = mid + 1
-        else:
-            hi_bs = mid
-    lo = lo_bs
-    hi = lo_bs
-    while hi - lo < nn:
-        can_left = lo > 0
-        can_right = hi < n
-        if can_left and can_right:
-            if xv - x_sorted[lo - 1] <= x_sorted[hi] - xv:
-                lo -= 1
-            else:
-                hi += 1
-        elif can_left:
-            lo -= 1
-        elif can_right:
-            hi += 1
-        else:
-            break
-
-    h = 0.0
-    for k in range(lo, hi):
-        d = abs(x_sorted[k] - xv)
-        if d > h:
-            h = d
-    h += 1e-10
-
-    sum_w = 0.0
-    sum_w_dx = 0.0
-    sum_w_dx2 = 0.0
-
-    for k in range(lo, hi):
-        u = abs(x_sorted[k] - xv) / h
-        if u >= 1.0:
-            wk = 0.0
-        else:
-            t = 1.0 - u * u * u
-            wk = t * t * t
-        wk *= w_sorted[k]
-        dx = x_sorted[k] - xv
-        sum_w += wk
-        sum_w_dx += wk * dx
-        sum_w_dx2 += wk * dx * dx
-
-    det = sum_w * sum_w_dx2 - sum_w_dx * sum_w_dx
-    if abs(det) < 1e-300:
-        # Fallback: find nearest data point
-        best_k = lo
-        best_d = abs(x_sorted[lo] - xv)
-        for k in range(lo + 1, hi):
-            d = abs(x_sorted[k] - xv)
-            if d < best_d:
-                best_d = d
-                best_k = k
-        for j in range(ncols):
-            result_grid[i, j] = y_sorted[best_k, j]
-    else:
-        for j in range(ncols):
-            rhs0 = 0.0
-            rhs1 = 0.0
-            for k in range(lo, hi):
-                u = abs(x_sorted[k] - xv) / h
-                if u >= 1.0:
-                    wk = 0.0
-                else:
-                    t2 = 1.0 - u * u * u
-                    wk = t2 * t2 * t2
-                wk *= w_sorted[k]
-                dx = x_sorted[k] - xv
-                rhs0 += wk * y_sorted[k, j]
-                rhs1 += wk * dx * y_sorted[k, j]
-            result_grid[i, j] = (sum_w_dx2 * rhs0 - sum_w_dx * rhs1) / det
-
-
-@njit(cache=True, parallel=True)
-def _locfit_degree1_grid_kernel(x_eval, x_sorted, y_sorted, w_sorted, n, ncols, nn, result_grid):
-    """Evaluate locfit degree=1 at M grid points using sorted data."""
-    m = len(x_eval)
-    for i in prange(m):
-        idx = np.int64(i)
-        _locfit_degree1_grid_point(idx, x_eval, x_sorted, y_sorted, w_sorted, n, ncols, nn, result_grid)
-
-
-def _locfit_tree_degree0(x, y, w, span, cut=0.8):
-    """Fitted values of locfit(y ~ x, weights = w, alpha = span, deg = 0).
+def _locfit_tree(x, y, w, span, degree=0, cut=0.8):
+    """Fitted values of locfit(y ~ x, weights = w, alpha = span, deg = degree).
 
     Port of locfit's default evaluation structure (ev = "tree"; locfit
     1.5-9.12, ev_atree.c, ev_interp.c, lf_nbhd.c). locfit does not fit at
     every point. It fits at the vertices of an adaptive tree over the range
     of x, splitting a cell at its midpoint while the cell is wider than
-    `cut` times the smaller bandwidth of its two vertices, and interpolates
-    linearly between the two vertices of each point's cell. The columns of
-    y share the tree, which depends only on x, w and span.
+    `cut` times the smaller bandwidth of its two vertices. With degree 0 it
+    interpolates linearly between the two vertices of each point's cell;
+    with degree 1 each vertex also has a slope and the interpolation is
+    cubic Hermite (rectcell_interp). The columns of y share the tree, which
+    depends only on x, w and span.
     """
     n = x.shape[0]
     k = int(n * span + 1e-12)
@@ -222,13 +56,28 @@ def _locfit_tree_degree0(x, y, w, span, cut=0.8):
     vh = np.array(vh)
     cells = np.array(cells)
 
-    # Tricube-weighted local mean at each vertex
-    u = np.abs(x[None, :] - vx[:, None]) / np.where(vh > 0, vh, np.inf)[:, None]
+    # Tricube-weighted local mean (degree 0) or local line (degree 1) at
+    # each vertex
+    dx = x[None, :] - vx[:, None]
+    u = np.abs(dx) / np.where(vh > 0, vh, np.inf)[:, None]
     kern = np.where(u < 1, (1 - u ** 3) ** 3, 0.0) * w[None, :]
     kern[vh <= 0] = np.abs(x[None, :] - vx[vh <= 0, None]) == 0
     sw = kern.sum(axis=1)
-    fit = (kern @ y) / np.where(sw > 0, sw, 1.0)[:, None]
+    # Some BLAS builds (e.g. Apple Accelerate) raise spurious floating-point
+    # flags in matmul on finite input
+    with np.errstate(divide='ignore', over='ignore', invalid='ignore'):
+        t0 = kern @ y
+        t1 = (kern * dx) @ y if degree == 1 else None
+    fit = t0 / np.where(sw > 0, sw, 1.0)[:, None]
     fit[sw <= 0] = 0.0
+    if degree == 1:
+        s1 = (kern * dx).sum(axis=1)
+        s2 = (kern * dx * dx).sum(axis=1)
+        det = sw * s2 - s1 * s1
+        ok = det > 1e-12 * np.maximum(sw * s2, 1e-300)
+        safe_det = np.where(ok, det, 1.0)[:, None]
+        slope = np.where(ok[:, None], (sw[:, None] * t1 - s1[:, None] * t0) / safe_det, 0.0)
+        fit = np.where(ok[:, None], (s2[:, None] * t0 - s1[:, None] * t1) / safe_det, fit)
 
     # Descend to each point's cell, then interpolate between its vertices
     cell = np.zeros(n, dtype=np.int64)
@@ -245,7 +94,14 @@ def _locfit_tree_degree0(x, y, w, span, cut=0.8):
     width = vx[hi] - vx[lo]
     step = x - vx[lo]
     safe = np.where(width > 0, width, 1.0)
-    out = ((width - step)[:, None] * fit[lo] + step[:, None] * fit[hi]) / safe[:, None]
+    if degree == 0:
+        out = ((width - step)[:, None] * fit[lo] + step[:, None] * fit[hi]) / safe[:, None]
+    else:
+        # hermite2(): cubic in t = step / width, slopes scaled by the width
+        t = np.clip(step / safe, 0.0, 1.0)[:, None]
+        phi1 = t * t * (3 - 2 * t)
+        out = ((1 - phi1) * fit[lo] + phi1 * fit[hi]
+               + width[:, None] * (t * (1 - t) ** 2 * slope[lo] + t * t * (t - 1) * slope[hi]))
     out[width <= 0] = fit[lo[width <= 0]]
     return out
 
@@ -253,9 +109,8 @@ def _locfit_tree_degree0(x, y, w, span, cut=0.8):
 def locfit_by_col(y, x=None, weights=1, span=0.5, degree=0):
     """Local regression smoother for columns of a matrix.
 
-    Port of edgeR's locfitByCol. Degree 0 follows locfit's adaptive-tree
-    evaluation exactly. Degree 1 uses a local weighted regression at every
-    point, which approximates locfit's tree evaluation.
+    Port of edgeR's locfitByCol, following locfit's adaptive-tree
+    evaluation for degree 0 and degree 1.
     """
     y = np.asarray(y, dtype=np.float64)
     if y.ndim == 1:
@@ -270,35 +125,7 @@ def locfit_by_col(y, x=None, weights=1, span=0.5, degree=0):
     if span * n < 2 or n <= 1:
         return y.copy()
 
-    if degree == 0:
-        return _locfit_tree_degree0(x, y, weights, span)
-
-    # Sort by x for efficient windowing
-    order = np.argsort(x)
-    x_sorted = x[order].copy()
-    y_sorted = y[order].copy()
-    w_sorted = weights[order].copy()
-
-    nn = max(2, int(round(span * n)))
-
-    # Adaptive grid path for large n: evaluate at M grid points, interpolate
-    if n > 1000:
-        M = 200
-        x_eval = np.linspace(x_sorted[0], x_sorted[-1], M)
-        result_grid = np.zeros((M, ncols), dtype=np.float64)
-        _locfit_degree1_grid_kernel(x_eval, x_sorted, y_sorted, w_sorted, n, ncols, nn, result_grid)
-        # Interpolate grid results to all data points
-        result_sorted = np.empty((n, ncols), dtype=np.float64)
-        for j in range(ncols):
-            result_sorted[:, j] = np.interp(x_sorted, x_eval, result_grid[:, j])
-    else:
-        result_sorted = np.zeros((n, ncols), dtype=np.float64)
-        _locfit_degree1_kernel(x_sorted, y_sorted, w_sorted, n, ncols, nn, result_sorted)
-
-    # Unsort
-    result = np.empty_like(result_sorted)
-    result[order] = result_sorted
-    return result
+    return _locfit_tree(x, y, weights, span, degree=degree)
 
 
 @njit(cache=True)

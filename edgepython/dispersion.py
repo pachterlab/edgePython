@@ -9,11 +9,11 @@ estimateGLMTagwiseDisp, and WLEB.
 
 import numpy as np
 import warnings
-from scipy.optimize import minimize_scalar
 
 from .expression import ave_log_cpm
+from .compressed_matrix import CompressedMatrix
 from .utils import (expand_as_matrix, moving_average_by_col, cut_with_min_n,
-                    drop_empty_levels, systematic_subset)
+                    drop_empty_levels, systematic_subset, optimize_brent)
 from .smoothing import locfit_by_col, loess_by_col
 from .limma_port import squeeze_var, choose_lowess_span
 from .dispersion_lowlevel import (
@@ -44,12 +44,26 @@ def _independent_columns(design, tol=1e-7):
     return keep
 
 
+def _offset_repeats_rows(offset):
+    """Whether edgeR would store the offset with repeated rows.
+
+    True for a scalar, a vector or a 1 x nlibs matrix (the same offsets for
+    every gene), as in edgeR's makeCompressedMatrix; a full matrix counts as
+    genewise even if its rows are equal.
+    """
+    if isinstance(offset, CompressedMatrix):
+        return bool(offset.repeat_row)
+    offset = np.asarray(offset)
+    return offset.ndim < 2 or offset.shape[0] == 1
+
+
 def _apl_grid_by_zero_pattern(grid_dispersions, y, design, offset, weights):
     """Adjusted profile likelihood on the grid, as in edgeR's estimateDisp.
 
     edgeR groups genes by which libraries are fitted as exact zeros, drops
     those libraries, reduces the design to its independent columns, and
     leaves the APL at zero for groups whose reduced design is saturated.
+    Each grid point's fit starts from the previous point's coefficients.
     """
     from .glm_fit import glm_fit
 
@@ -69,10 +83,15 @@ def _apl_grid_by_zero_pattern(grid_dispersions, y, design, offset, weights):
             if redesign.shape[0] == redesign.shape[1]:
                 continue
         rows = np.flatnonzero(group.reshape(-1) == k)
-        l0[rows] = adjusted_profile_lik_grid(
-            grid_dispersions, y[np.ix_(rows, nonzero)], redesign,
-            offset[np.ix_(rows, nonzero)],
-            weights=weights[np.ix_(rows, nonzero)])
+        cur_y = y[np.ix_(rows, nonzero)]
+        cur_offset = offset[np.ix_(rows, nonzero)]
+        cur_weights = weights[np.ix_(rows, nonzero)]
+        last_beta = None
+        for i, disp in enumerate(grid_dispersions):
+            out = adjusted_profile_lik(disp, cur_y, redesign, cur_offset, weights=cur_weights,
+                                       start=last_beta, get_coef=True)
+            l0[rows, i] = out['apl']
+            last_beta = out['beta']
     return l0
 
 
@@ -211,9 +230,13 @@ def estimate_disp(y, design=None, group=None, lib_size=None, offset=None,
     if np.any(~np.isfinite(lib_size)) or np.any(lib_size <= 0):
         raise ValueError("library sizes must be positive finite values")
 
-    # Build offset
+    # Build offset. As in edgeR 5.0, the classic model is used only without
+    # a design and with the same offsets for every gene (none, or a vector).
     if offset is None:
         offset = np.log(lib_size)
+    classic = design is None and _offset_repeats_rows(offset)
+    if isinstance(offset, CompressedMatrix):
+        offset = offset.as_matrix()
     offset = np.asarray(offset, dtype=np.float64)
     offset_mat = expand_as_matrix(offset, y.shape)
 
@@ -234,7 +257,17 @@ def estimate_disp(y, design=None, group=None, lib_size=None, offset=None,
     grid_vals = spline_disp / (1 + spline_disp)
     l0 = np.zeros((np.sum(sel), grid_length))
 
-    if design is None:
+    if design is None and not classic:
+        # Genewise offsets without a design: edgeR 5.0 no longer uses the
+        # classic model (which ignores offsets) but then fails for want of
+        # a design. Use the design the classic model would have used.
+        if len(np.unique(group)) == 1:
+            design = np.ones((nlibs, 1))
+        else:
+            from .utils import _model_matrix_group
+            design = _model_matrix_group(group)
+
+    if classic:
         # Classic edgeR approach
         unique_groups = np.unique(group)
         if np.all(np.bincount(group.astype(int) if np.issubdtype(group.dtype, np.integer) else
@@ -244,11 +277,12 @@ def estimate_disp(y, design=None, group=None, lib_size=None, offset=None,
                     'trended.dispersion': np.nan,
                     'tagwise.dispersion': np.nan}
 
+        # The classic design is also used for the prior df below
         if len(unique_groups) == 1:
-            design_classic = np.ones((nlibs, 1))
+            design = np.ones((nlibs, 1))
         else:
             from .utils import _model_matrix_group
-            design_classic = _model_matrix_group(group)
+            design = _model_matrix_group(group)
 
         # Equalize library sizes and estimate common dispersion
         from .exact_test import equalize_lib_sizes, split_into_groups
@@ -256,11 +290,9 @@ def estimate_disp(y, design=None, group=None, lib_size=None, offset=None,
         y_pseudo = eq['pseudo.counts'][sel]
         y_split = split_into_groups(y_pseudo, group=group)
 
-        # Optimize common dispersion
-        result = minimize_scalar(
-            lambda d: -common_cond_log_lik_der_delta(y_split, d, der=0),
-            bounds=(1e-4, 100 / 101), method='bounded')
-        delta = result.x
+        # Optimize common dispersion with R's optimize(), as edgeR does
+        delta = optimize_brent(lambda d: -common_cond_log_lik_der_delta(y_split, d, der=0),
+                               1e-4, 100 / 101, tol=tol)
         disp = delta / (1 - delta)
 
         # Re-equalize
@@ -319,10 +351,7 @@ def estimate_disp(y, design=None, group=None, lib_size=None, offset=None,
     # Calculate prior_df
     if prior_df is None:
         from .glm_fit import glm_fit
-        if design is None:
-            design_fit = np.ones((nlibs, 1))
-        else:
-            design_fit = design
+        design_fit = design
         glmfit = glm_fit(sely, offset=seloffset, weights=selweights,
                          design=design_fit, dispersion=disp_trend, prior_count=0)
 
@@ -341,7 +370,7 @@ def estimate_disp(y, design=None, group=None, lib_size=None, offset=None,
                              robust=robust, winsor_tail_p=winsor_tail_p)
         prior_df = s2_fit.get('df.prior', s2_fit.get('df_prior'))
 
-    ncoefs = design.shape[1] if design is not None else 1
+    ncoefs = design.shape[1]
     prior_n = prior_df / (nlibs - ncoefs)
 
     # Initiate tagwise dispersions
@@ -361,7 +390,12 @@ def estimate_disp(y, design=None, group=None, lib_size=None, offset=None,
                       covariate=ave_lcpm[sel] if ave_lcpm is not None else None,
                       trend_method=trend_method, span=span, legacy_span=False,
                       overall=False, trend=False, m0=m0)
-        tagwise_dispersion[sel] = 0.1 * 2 ** out_2['individual']
+        if not robust:
+            tagwise_dispersion[sel] = 0.1 * 2 ** out_2['individual']
+        else:
+            # Genes with prior.n > 1e6 keep their trended dispersion
+            keep = ~np.broadcast_to(too_large, out_2['individual'].shape)
+            tagwise_dispersion[np.flatnonzero(sel)[keep]] = 0.1 * 2 ** out_2['individual'][keep]
 
     if robust:
         temp_df = prior_df
@@ -563,11 +597,8 @@ def estimate_common_disp(y, group=None, lib_size=None, tol=1e-6,
         y_pseudo = eq['pseudo.counts']
         y_split = split_into_groups(y_pseudo, group=group)
 
-        result = minimize_scalar(
-            lambda d: -common_cond_log_lik_der_delta(y_split, d, der=0),
-            bounds=(1e-4, 100 / 101), method='bounded',
-            options={'xatol': tol})
-        delta = result.x
+        delta = optimize_brent(lambda d: -common_cond_log_lik_der_delta(y_split, d, der=0),
+                               1e-4, 100 / 101, tol=tol)
         disp = delta / (1 - delta)
 
     if verbose:

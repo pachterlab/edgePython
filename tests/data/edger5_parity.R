@@ -142,6 +142,47 @@ for (legacy in c(FALSE, TRUE)) {
   out[[paste0("treat_qllegacy", sfx)]] <- treat(fit_legacy, coef = 5)
   rm(poisson.bound)
 }
+# estimateDisp: GLM and classic modes, robust, weights and trend methods
+disp_values <- function(e) list(common = e$common.dispersion, trended = e$trended.dispersion,
+                                tagwise = e$tagwise.dispersion, prior_df = e$prior.df,
+                                span = e$span)
+dge0 <- normLibSizes(DGEList(counts, group = group))
+out$disp_glm <- disp_values(estimateDisp(dge0, inputs$additive))
+out$disp_glm_robust <- disp_values(estimateDisp(dge0, inputs$additive, robust = TRUE))
+dgew <- dge0
+dgew$weights <- weights
+out$disp_glm_weights <- disp_values(estimateDisp(dgew, inputs$additive))
+out$disp_classic <- disp_values(estimateDisp(dge0))
+out$disp_classic_robust <- disp_values(estimateDisp(dge0, robust = TRUE))
+out$disp_classic_onegroup <- disp_values(estimateDisp(normLibSizes(DGEList(counts))))
+for (tm in c("movingave", "loess", "locfit.mixed"))
+  out[[paste0("disp_trend_", tm)]] <- disp_values(estimateDisp(dge0, inputs$additive, trend.method = tm))
+# With trend.method = "none", edgeR builds m0 with one row per gene, not per
+# gene passing min.row.sum, and fails if any gene is filtered (edgeR 4 too).
+# The reference uses estimateDisp.default with nrow(l0) rows.
+src <- deparse(edgeR:::estimateDisp.default)
+stopifnot(sum(grepl("matrix(colMeans(l0), ntags,", src, fixed = TRUE)) == 1)
+estimateDispFixed <- eval(parse(text = sub("matrix(colMeans(l0), ntags,", "matrix(colMeans(l0), nrow(l0),",
+                                           src, fixed = TRUE)), envir = asNamespace("edgeR"))
+out$disp_trend_none <- disp_values(estimateDispFixed(counts, inputs$additive, group = group,
+  lib.size = dge0$samples$lib.size * dge0$samples$norm.factors, trend.method = "none"))
+out$common_disp_classic <- estimateCommonDisp(dge0)$common.dispersion
+# locfit degree 1, which locfit.mixed uses, with prior weights and ties
+set.seed(11)
+inputs$loc1_x <- sort(rnorm(600))
+inputs$loc1_x[5:8] <- inputs$loc1_x[5]
+inputs$loc1_y <- cbind(sin(2 * inputs$loc1_x) + rnorm(600, 0, 0.3), inputs$loc1_x^2)
+inputs$loc1_w <- runif(600, 0.5, 2)
+out$locfit_degree1 <- locfitByCol(inputs$loc1_y, inputs$loc1_x, weights = inputs$loc1_w,
+                                  span = 0.3, degree = 1)
+# Genewise offsets without a design: edgeR 5.0 does not use the classic
+# model but then fails; the intended result uses the group design
+inputs$genewise_offset <- matrix(log(dge0$samples$lib.size * dge0$samples$norm.factors),
+                                 ngenes, nlibs, byrow = TRUE) +
+                          matrix(seq(-0.05, 0.05, length.out = ngenes * nlibs), ngenes, nlibs)
+out$disp_genewise_offset <- disp_values(estimateDisp(counts, design = model.matrix(~group),
+                                                     group = group, offset = inputs$genewise_offset))
+
 # Unequal-df squeezeVar on enough genes that the loess span is below 1
 set.seed(7)
 inputs$sv2_var <- rchisq(2000, 4) / 4 * exp(rnorm(2000, 0, 0.3))

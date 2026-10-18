@@ -227,9 +227,7 @@ def test_glm_ql_ftest_thresholds_match_edger5(ftest_fits, case):
         kwargs["contrast"] = _as_array(INPUTS[kwargs["contrast"]])
     res = ep.glm_ql_ftest(ftest_fits[which], **kwargs)
     table = res["table"]
-    # Legacy fits use estimate_disp's trended dispersions, which differ from
-    # edgeR's by about 5e-6
-    rtol = 1e-4 if which == "legacy" else 1e-5
+    rtol = 1e-6
     logfc = table[[c for c in table.columns if c.startswith("logFC")]].to_numpy()
     _assert_close(logfc.reshape(np.shape(_edger(case, "logFC"))), _edger(case, "logFC"),
                   rtol=rtol, atol=1e-9)
@@ -285,14 +283,18 @@ def test_glm_treat_matches_edger5(treat_fits, case, legacy):
     key = case + ("_legacy" if legacy else "")
     args = {"coef": 4, "lfc": np.log2(1.5), "legacy": legacy, **kwargs}
     table = ep.glm_treat(treat_fits[which], **args)["table"]
-    # LR and legacy QL fits use estimate_disp's dispersions, about 5e-6 off
-    rtol = 1e-7 if which == "ql" else 1e-4
+    rtol = 1e-7 if which == "ql" else 1e-6
     _assert_close(table["PValue"], _edger(key, "pvalue"), rtol=rtol, atol=1e-12)
-    _assert_close(table["logFC"], _edger(key, "logFC"), rtol=rtol, atol=1e-9)
+    # Without prior counts logFC is the unshrunk coefficient (see below)
+    _assert_close(table["logFC"], _edger(key, "logFC"),
+                  rtol=max(rtol, 1e-5) if which == "lrt0" else rtol, atol=1e-9)
     if which == "lrt0":
         assert "unshrunk.logFC" not in table.columns
     else:
-        _assert_close(table["unshrunk.logFC"], _edger(key, "unshrunk_logFC"), rtol=rtol, atol=1e-9)
+        # Unshrunk coefficients of genes with an all-zero group (about -25 on
+        # the log2 scale) are determined only to the fitter's tolerance
+        _assert_close(table["unshrunk.logFC"], _edger(key, "unshrunk_logFC"),
+                      rtol=max(rtol, 1e-5), atol=1e-9)
 
 
 def test_glm_treat_legacy_p_values_are_genewise(treat_fits):
@@ -305,3 +307,59 @@ def test_glm_treat_legacy_p_values_are_genewise(treat_fits):
     part = ep.glm_treat(sub, coef=4, lfc=np.log2(1.5), legacy=True)["table"]["PValue"].to_numpy()
     assert np.all(np.isnan(full[~nonzero]))
     np.testing.assert_allclose(full[nonzero], part, rtol=1e-12)
+
+
+def _fresh_dgelist(weights=None):
+    dge = ep.calc_norm_factors(ep.make_dgelist(COUNTS, group=np.repeat(["A", "B", "C"], 3)))
+    if weights is not None:
+        dge["weights"] = weights
+    return dge
+
+
+DISP_CASES = {
+    "disp_glm": lambda: ep.estimate_disp(_fresh_dgelist(), _as_array(INPUTS["additive"])),
+    "disp_glm_robust": lambda: ep.estimate_disp(_fresh_dgelist(), _as_array(INPUTS["additive"]),
+                                                robust=True),
+    "disp_glm_weights": lambda: ep.estimate_disp(_fresh_dgelist(WEIGHTS), _as_array(INPUTS["additive"])),
+    "disp_classic": lambda: ep.estimate_disp(_fresh_dgelist()),
+    "disp_classic_robust": lambda: ep.estimate_disp(_fresh_dgelist(), robust=True),
+    "disp_classic_onegroup": lambda: ep.estimate_disp(ep.calc_norm_factors(ep.make_dgelist(COUNTS))),
+    "disp_trend_none": lambda: ep.estimate_disp(_fresh_dgelist(), _as_array(INPUTS["additive"]),
+                                                trend_method="none"),
+    "disp_trend_movingave": lambda: ep.estimate_disp(_fresh_dgelist(), _as_array(INPUTS["additive"]),
+                                                     trend_method="movingave"),
+    "disp_trend_loess": lambda: ep.estimate_disp(_fresh_dgelist(), _as_array(INPUTS["additive"]),
+                                                 trend_method="loess"),
+    "disp_trend_locfit.mixed": lambda: ep.estimate_disp(_fresh_dgelist(), _as_array(INPUTS["additive"]),
+                                                        trend_method="locfit.mixed"),
+    # edgeR 5.0 does not use the classic model with genewise offsets (and then
+    # fails); the reference is the GLM with the classic group design
+    "disp_genewise_offset": lambda: ep.estimate_disp(COUNTS, group=np.repeat(["A", "B", "C"], 3),
+                                                     offset=_as_array(INPUTS["genewise_offset"])),
+}
+
+
+@pytest.mark.parametrize("case", list(DISP_CASES))
+def test_estimate_disp_matches_edger5(case):
+    # The APL grid warm-starts each dispersion from the previous one's
+    # coefficients, as edgeR does
+    e = DISP_CASES[case]()
+    for key, rkey in [("common.dispersion", "common"), ("trended.dispersion", "trended"),
+                      ("tagwise.dispersion", "tagwise"), ("prior.df", "prior_df")]:
+        if EDGER[case].get(rkey) in (None, [], {}):
+            continue
+        expected = _edger(case, rkey)
+        actual = np.broadcast_to(np.asarray(e[key], dtype=np.float64), np.shape(expected))
+        _assert_close(actual, expected, rtol=1e-8)
+
+
+def test_estimate_common_disp_classic_matches_edger():
+    assert ep.estimate_common_disp(_fresh_dgelist())["common.dispersion"] == \
+        pytest.approx(_edger("common_disp_classic")[0], rel=1e-8)
+
+
+def test_locfit_degree1_matches_locfit_tree_evaluation():
+    from edgepython.smoothing import locfit_by_col
+    fitted = locfit_by_col(_as_array(INPUTS["loc1_y"]), _as_array(INPUTS["loc1_x"]),
+                           weights=_as_array(INPUTS["loc1_w"]), span=0.3, degree=1)
+    np.testing.assert_allclose(fitted, _edger("locfit_degree1"), rtol=1e-11, atol=1e-11)
