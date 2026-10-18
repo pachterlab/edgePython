@@ -11,6 +11,7 @@ from scipy.stats import chi2, f as f_dist
 from scipy.special import gammaln
 
 from .expression import ave_log_cpm
+from .glm_levenberg import _expand_compressed
 from .limma_port import contrast_as_coef
 
 
@@ -195,6 +196,29 @@ def glm_ql_ftest(glmfit, coef=None, contrast=None, poisson_bound=True):
     # P-values from F-distribution
     F_pvalue = f_dist.sf(np.maximum(F_stat, 0), dfn=df_test_val, dfd=df_total)
 
+    # Poisson bound, as in edgeR's glmQLFTest: for genes where
+    # s2.post * (1 + dispersion * fitted) < 1 in any library, the p-value is
+    # the larger of the F-test's and that of a Poisson LRT, refitted at
+    # dispersion 0 from the unshrunk coefficients.
+    if poisson_bound:
+        below = _is_below_poisson_bound(glmfit)
+        if np.any(below):
+            from .glm_fit import glm_fit
+            shape = np.shape(glmfit['counts'])
+            weights = glmfit.get('weights')
+            if weights is not None:
+                weights = _expand_compressed(weights, shape)[below]
+            pois_fit = glm_fit(
+                np.asarray(glmfit['counts'], dtype=np.float64)[below],
+                design=glmfit['design'],
+                offset=_expand_compressed(glmfit['offset'], shape)[below],
+                weights=weights, dispersion=0.0,
+                start=np.asarray(glmfit['unshrunk.coefficients'])[below])
+            pois_fit['AveLogCPM'] = np.asarray(glmfit['AveLogCPM'])[below]
+            pois_res = glm_lrt(pois_fit, coef=coef, contrast=contrast)
+            pois_pvalue = pois_res['table']['PValue'].to_numpy(dtype=np.float64)
+            F_pvalue[below] = np.maximum(F_pvalue[below], pois_pvalue)
+
     # Update output
     out['table'].drop(columns=['LR'], inplace=True, errors='ignore')
     out['table']['F'] = F_stat
@@ -202,6 +226,18 @@ def glm_ql_ftest(glmfit, coef=None, contrast=None, poisson_bound=True):
     out['df.total'] = df_total
 
     return out
+
+
+def _is_below_poisson_bound(glmfit):
+    """Port of edgeR's .isBelowPoissonBound: one flag per gene."""
+    fitted = np.asarray(glmfit['fitted.values'], dtype=np.float64)
+    ngenes = fitted.shape[0]
+    disp = np.asarray(glmfit['dispersion'], dtype=np.float64)
+    if disp.ndim < 2:
+        disp = np.broadcast_to(disp.reshape(-1), ngenes)[:, None]
+    s2 = np.broadcast_to(
+        np.asarray(glmfit['s2.post'], dtype=np.float64).reshape(-1), ngenes)
+    return np.any(s2[:, None] * (1 + disp * fitted) < 1, axis=1)
 
 
 def glm_treat(glmfit, coef=None, contrast=None, lfc=np.log2(1.2),
