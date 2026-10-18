@@ -340,7 +340,10 @@ def glm_ql_fit(y, design=None, dispersion=None, offset=None, lib_size=None,
         ``'~ group'``, ``'~ batch + condition'``) evaluated
         against DGEList sample metadata via patsy.
     dispersion : float or ndarray, optional
-        NB dispersions.
+        NB dispersions. If None, legacy fits use the DGEList's trended (or
+        common) dispersion; otherwise, as in edgeR 5.0, a common dispersion
+        is estimated from the most abundant genes and dispersions stored in
+        a DGEList are not used.
     offset : ndarray, optional
         Offsets.
     lib_size : ndarray, optional
@@ -360,9 +363,11 @@ def glm_ql_fit(y, design=None, dispersion=None, offset=None, lib_size=None,
     legacy : bool
         Use legacy (old-style) QL method.
     top_proportion : float, optional
-        Proportion of top-abundance genes for dispersion estimation.
+        Proportion of top-abundance genes for dispersion estimation. The
+        default is edgeR's choice, chooseLowessSpan(ngenes * sqrt(df),
+        small.n = 20, min.span = 0.02); edgeR 5.0 no longer exposes it.
     keep_unit_mat : bool
-        Keep unit deviance matrix.
+        Not implemented; edgeR 5.0 removed this argument.
 
     Returns
     -------
@@ -389,18 +394,14 @@ def glm_ql_fit(y, design=None, dispersion=None, offset=None, lib_size=None,
         if dge.get('AveLogCPM') is None:
             dge['AveLogCPM'] = _ave_log_cpm(dge)
 
-        if dispersion is None:
-            if legacy:
-                dispersion = dge.get('trended.dispersion')
-                if dispersion is None:
-                    dispersion = dge.get('common.dispersion')
-                if dispersion is None:
-                    raise ValueError("No dispersion values found in DGEList object.")
-            else:
-                if dge.get('trended.dispersion') is not None:
-                    ntop = int(np.ceil(0.1 * dge['counts'].shape[0]))
-                    i = np.argsort(dge['AveLogCPM'])[::-1][:ntop]
-                    dispersion = np.mean(dge['trended.dispersion'][i])
+        # As in edgeR 5.0, only legacy fits take the stored dispersions; the
+        # default method estimates its own NB dispersion from the top genes
+        if dispersion is None and legacy:
+            dispersion = dge.get('trended.dispersion')
+            if dispersion is None:
+                dispersion = dge.get('common.dispersion')
+            if dispersion is None:
+                raise ValueError("No dispersion values found in DGEList object.")
 
         from .dgelist import get_offset
         offset = get_offset(dge)
@@ -438,59 +439,23 @@ def glm_ql_fit(y, design=None, dispersion=None, offset=None, lib_size=None,
         ave_log_cpm = _ave_log_cpm(y_mat, offset=offset, lib_size=lib_size,
                                     weights=weights, dispersion=dispersion)
 
-    # Check dispersion
-    if dispersion is None:
-        if legacy:
-            raise ValueError("No dispersion values provided.")
-        else:
-            if top_proportion is None:
-                df_residual = nlibs - design.shape[1]
-                top_proportion = choose_lowess_span(
-                    ngenes * np.sqrt(df_residual), small_n=20, min_span=0.02)
-            else:
-                if top_proportion < 0 or top_proportion > 1:
-                    raise ValueError("top_proportion should be between 0 and 1.")
-            ntop = int(np.ceil(top_proportion * ngenes))
-            i = np.argsort(ave_log_cpm)[::-1][:ntop]
-            from .dispersion import estimate_glm_common_disp
-            if offset is not None:
-                off_sub = np.asarray(offset)
-                if off_sub.ndim == 2:
-                    off_sub = off_sub[i]
-            else:
-                off_sub = None
-            w_sub = None
-            if weights is not None:
-                w_arr = np.asarray(weights)
-                if w_arr.ndim == 2:
-                    w_sub = w_arr[i]
-            dispersion = estimate_glm_common_disp(
-                y_mat[i], design=design, offset=off_sub, weights=w_sub)
-    else:
-        # Cap dispersion at 4 for non-legacy
-        if not legacy:
-            dispersion = np.atleast_1d(np.asarray(dispersion, dtype=np.float64))
-            if np.max(dispersion) > 4:
-                dispersion = np.minimum(dispersion, 4.0)
-
-    # Fit GLM (prior_count=0.125 matches R's glmFit.default default for logFC shrinkage)
-    fit = glm_fit(y_mat, design=design, dispersion=dispersion, offset=offset,
-                  lib_size=lib_size, weights=weights, prior_count=0.125)
-
     # Store AveLogCPM for computation
-    ave_log_cpm2 = ave_log_cpm.copy()
+    ave_log_cpm2 = np.asarray(ave_log_cpm, dtype=np.float64).copy()
 
     # Covariate for trended prior
     if covariate_trend is None:
-        if abundance_trend:
-            fit['AveLogCPM'] = ave_log_cpm
-        else:
+        if not abundance_trend:
             ave_log_cpm = None
     else:
         ave_log_cpm = covariate_trend
 
     # Setting residual deviances and df
     if legacy:
+        if dispersion is None:
+            raise ValueError("No dispersion values provided.")
+        fit = glm_fit(y_mat, design=design, dispersion=dispersion, offset=offset,
+                      lib_size=lib_size, weights=weights, prior_count=0.125)
+
         # Old-style: adjust df for fitted values at zero
         zerofit = (fit['fitted.values'] < 1e-4) & (fit['counts'] < 1e-4)
         df_residual = residual_df(zerofit, fit['design'])
@@ -501,10 +466,29 @@ def glm_ql_fit(y, design=None, dispersion=None, offset=None, lib_size=None,
         # New-style: adjusted deviance and df using QL weights (matching R's C code)
         from .ql_weights import update_prior, compute_adjust_vec
 
-        # Expand dispersion to matrix form for ql_weights
+        if dispersion is None:
+            # Cox-Reid common dispersion of the most abundant genes, as in
+            # edgeR's coxreid_disp_top: no row filtering or subsetting
+            if top_proportion is None:
+                df_residual = nlibs - design.shape[1]
+                top_proportion = choose_lowess_span(
+                    ngenes * np.sqrt(df_residual), small_n=20, min_span=0.02)
+            elif top_proportion < 0 or top_proportion > 1:
+                raise ValueError("top_proportion should be between 0 and 1.")
+            ntop = min(max(int(np.ceil(top_proportion * ngenes)), 1), ngenes)
+            i = np.argsort(-ave_log_cpm2, kind='stable')[:ntop]
+            from .dispersion_lowlevel import disp_cox_reid
+            offset_mat = _offset_matrix(y_mat, offset, lib_size)
+            w_top = None if weights is None else _expand_to_matrix(weights, y_mat.shape)[i]
+            dispersion = disp_cox_reid(y_mat[i], design=design, offset=offset_mat[i],
+                                       weights=w_top, interval=(0, 4), tol=1e-5,
+                                       min_row_sum=0, subset=None)
+
         disp_arr = np.atleast_1d(np.asarray(dispersion, dtype=np.float64))
 
-        # Compute average quasi-dispersion via iterative lowess + adjusted deviance
+        # Average quasi-dispersion from a fit without prior counts
+        fit = glm_fit(y_mat, design=design, dispersion=dispersion, offset=offset,
+                      lib_size=lib_size, weights=weights, prior_count=0)
         ave_ql_disp = update_prior(y_mat, fit['fitted.values'], design,
                                    disp_arr, weights, ave_log_cpm2)
 
@@ -529,13 +513,20 @@ def glm_ql_fit(y, design=None, dispersion=None, offset=None, lib_size=None,
                          robust=robust, winsor_tail_p=winsor_tail_p,
                          legacy=legacy)
 
+    fit['AveLogCPM'] = ave_log_cpm2
     fit['df.prior'] = s2_fit['df_prior']
     fit['s2.post'] = s2_fit['var_post']
     fit['s2.prior'] = s2_fit['var_prior']
-    if not legacy:
-        fit['top.proportion'] = top_proportion
 
     return fit
+
+
+def _offset_matrix(y, offset, lib_size):
+    """Log offsets as a (ngenes, nlibs) matrix, as edgeR's .compressOffsets."""
+    if offset is None:
+        lib_size = y.sum(axis=0) if lib_size is None else np.asarray(lib_size, dtype=np.float64)
+        offset = np.log(lib_size)
+    return np.ascontiguousarray(_expand_to_matrix(offset, y.shape), dtype=np.float64)
 
 
 def _compute_ave_ql_disp(s2, df, ave_log_cpm):

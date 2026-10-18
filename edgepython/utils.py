@@ -46,6 +46,80 @@ def expand_as_matrix(x, dim=None, byrow=True):
     raise ValueError("x has wrong dimensions")
 
 
+def optimize_brent(f, lower, upper, tol=np.finfo(float).eps ** 0.25):
+    """Minimize f over [lower, upper] as R's optimize() does.
+
+    Port of R's Brent_fmin (copied in edgeR as brent_fmin): golden-section
+    search with parabolic interpolation, stopping when the bracket is within
+    2 * (sqrt(eps) * |x| + tol / 3) of x. R's default tol is eps^0.25.
+    Where the minimum is at a bound, R's answer depends on exactly where
+    this search stops, so a different minimizer gives different values.
+    """
+    c = (3.0 - np.sqrt(5.0)) * 0.5
+    eps = np.sqrt(np.finfo(float).eps)
+    a, b = lower, upper
+    v = a + c * (b - a)
+    w = x = v
+    d = e = 0.0
+    fx = f(x)
+    fv = fw = fx
+    tol3 = tol / 3.0
+    while True:
+        xm = (a + b) * 0.5
+        tol1 = eps * abs(x) + tol3
+        t2 = tol1 * 2.0
+        if abs(x - xm) <= t2 - (b - a) * 0.5:
+            break
+        p = q = r = 0.0
+        if abs(e) > tol1:
+            # fit parabola
+            r = (x - w) * (fx - fv)
+            q = (x - v) * (fx - fw)
+            p = (x - v) * q - (x - w) * r
+            q = (q - r) * 2.0
+            if q > 0.0:
+                p = -p
+            else:
+                q = -q
+            r = e
+            e = d
+        if abs(p) >= abs(q * 0.5 * r) or p <= q * (a - x) or p >= q * (b - x):
+            # golden-section step
+            e = b - x if x < xm else a - x
+            d = c * e
+        else:
+            # parabolic interpolation step
+            d = p / q
+            u = x + d
+            if u - a < t2 or b - u < t2:
+                d = tol1 if x < xm else -tol1
+        if abs(d) >= tol1:
+            u = x + d
+        elif d > 0.0:
+            u = x + tol1
+        else:
+            u = x - tol1
+        fu = f(u)
+        if fu <= fx:
+            if u < x:
+                b = x
+            else:
+                a = x
+            v, w, x = w, x, u
+            fv, fw, fx = fw, fx, fu
+        else:
+            if u < x:
+                a = u
+            else:
+                b = u
+            if fu <= fw or w == x:
+                v, fv = w, fw
+                w, fw = u, fu
+            elif fu <= fv or v == x or v == w:
+                v, fv = u, fu
+    return x
+
+
 def add_prior_count(y, lib_size=None, offset=None, prior_count=1):
     """Add library-size-adjusted prior counts.
 

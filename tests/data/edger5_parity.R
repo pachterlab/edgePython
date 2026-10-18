@@ -60,6 +60,55 @@ out$nbinom_deviance <- nbinomDeviance(counts, glmFit(counts, inputs$additive,
 out$nbinom_deviance_small_disp <- nbinomDeviance(counts[1:40, ],
   matrix(rowMeans(counts[1:40, ]) + 0.5, 40, nlibs), dispersion = 1e-6)
 
+# glmQLFit with legacy = FALSE (the default). From a DGEList holding
+# estimateDisp's dispersions, which edgeR 5.0 no longer uses; with
+# observation weights; with a preset dispersion above 4, which is not capped.
+ql_values <- function(fit, test = TRUE) {
+  res <- list(dispersion = fit$dispersion, average_ql = fit$average.ql.dispersion,
+              df_adj = fit$df.residual.adj, deviance_adj = fit$deviance.adj,
+              s2_prior = fit$s2.prior, df_prior = fit$df.prior, s2_post = fit$s2.post)
+  if (test) res$pvalue <- glmQLFTest(fit, coef = 5)$table$PValue
+  res
+}
+dge <- estimateDisp(normLibSizes(DGEList(counts)), inputs$additive)
+inputs$norm_factors <- dge$samples$norm.factors
+out$qlfit_dgelist <- ql_values(glmQLFit(dge, inputs$additive, robust = TRUE))
+out$qlfit_nonrobust <- ql_values(glmQLFit(dge, inputs$additive))
+out$qlfit_no_trend <- ql_values(glmQLFit(dge, inputs$additive, abundance.trend = FALSE))
+out$qlfit_weights <- ql_values(glmQLFit(counts, inputs$additive, offset = offset,
+                                        weights = weights, robust = TRUE))
+out$qlfit_disp10 <- ql_values(glmQLFit(counts, inputs$additive, offset = offset,
+                                       dispersion = 10), test = FALSE)
+
+# limma's squeezeVar with unequal df (fitFDistUnequalDF1)
+s2 <- out$qlfit_weights$deviance_adj / pmax(out$qlfit_weights$df_adj, 1e-8)
+inputs$sv_var <- s2
+inputs$sv_df <- out$qlfit_weights$df_adj
+inputs$sv_cov <- aveLogCPM(counts, offset = offset)
+for (robust in c(FALSE, TRUE)) {
+  s <- squeezeVar(s2, out$qlfit_weights$df_adj, covariate = inputs$sv_cov, robust = robust)
+  out[[paste0("squeezevar_unequal", if (robust) "_robust" else "")]] <-
+    list(var_prior = s$var.prior, df_prior = s$df.prior, var_post = s$var.post)
+}
+
+# Unequal-df squeezeVar on enough genes that the loess span is below 1
+set.seed(7)
+inputs$sv2_var <- rchisq(2000, 4) / 4 * exp(rnorm(2000, 0, 0.3))
+inputs$sv2_df <- runif(2000, 2, 6)
+inputs$sv2_cov <- rnorm(2000)
+s <- squeezeVar(inputs$sv2_var, inputs$sv2_df, covariate = inputs$sv2_cov)
+out$squeezevar_unequal_2000 <- list(var_prior = s$var.prior, df_prior = s$df.prior)
+out$choose_lowess_span <- c(chooseLowessSpan(20000, small.n = 500), chooseLowessSpan(1000))
+# R's optimize(), including a minimum at the upper bound
+out$optimize <- c(optimize(function(x) (x - 0.3)^2 + sin(5 * x), c(0, 2))$minimum,
+                  optimize(function(x) -log(x), c(0.5, 0.9998))$minimum)
+
+# Cox-Reid common dispersion and adjusted profile likelihoods
+out$disp_cox_reid <- c(oneway = dispCoxReid(counts, inputs$oneway, offset = offset),
+                       additive = dispCoxReid(counts, inputs$additive, offset = offset))
+out$apl <- adjustedProfileLik(0.1, counts, inputs$additive, offset = matrix(offset, ngenes, nlibs, byrow = TRUE))
+out$apl_oneway <- adjustedProfileLik(0.1, counts, inputs$oneway, offset = matrix(offset, ngenes, nlibs, byrow = TRUE))
+
 inputs$version <- c(R = as.character(getRversion()),
                     edgeR = as.character(packageVersion("edgeR")),
                     limma = as.character(packageVersion("limma")))

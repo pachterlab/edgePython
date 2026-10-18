@@ -10,213 +10,32 @@ dispCoxReidInterpolateTagwise, dispCoxReidSplineTrend, dispBinTrend, etc.
 import numpy as np
 import warnings
 from scipy.special import gammaln, digamma, polygamma
-from scipy.optimize import minimize_scalar, minimize
+from scipy.optimize import minimize
 from numba import njit
 
 from .utils import (expand_as_matrix, systematic_subset, moving_average_by_col,
                     cut_with_min_n)
 from .expression import ave_log_cpm
-
-
-def _cox_reid_adjust_from_xtwx(XtWX):
-    """Return -0.5 * log|XtWX| with a fast 2x2 path and LDL fallback.
-
-    For the common 2-coefficient bulk design, use a vectorized determinant path
-    and fall back to LDL only for near-singular matrices. This preserves edgeR
-    parity while avoiding per-gene LDL overhead on the hot path.
-    """
-
-    A = np.asarray(XtWX, dtype=np.float64)
-    if A.ndim == 2:
-        A = A[None, :, :]
-
-    ngenes, p, _ = A.shape
-    eps = 1e-10
-    from scipy.linalg import ldl
-
-    # Fast hot-path for the usual two-coefficient design.
-    if p == 2:
-        ad = A[:, 0, 0] * A[:, 1, 1]
-        bc = A[:, 0, 1] * A[:, 1, 0]
-        det = ad - bc
-        absdet = np.abs(det)
-        out = -0.5 * np.log(np.clip(absdet, eps, None))
-
-        # For near-singular matrices, use LDL to match edgeR's C-path behavior.
-        bad = (~np.isfinite(out)) | (absdet < 1e-10)
-        if np.any(bad):
-            for g in np.where(bad)[0]:
-                _, dmat, _ = ldl(A[g], lower=True, hermitian=True)
-                diag = np.abs(np.diag(dmat))
-                diag = np.where(diag > eps, diag, eps)
-                out[g] = -0.5 * np.sum(np.log(diag))
-        return out
-
-    # General path for other design sizes.
-    out = np.zeros(ngenes, dtype=np.float64)
-    sign, logabsdet = np.linalg.slogdet(A)
-    out[:] = -0.5 * logabsdet
-    bad = (~np.isfinite(logabsdet)) | (sign == 0)
-    if np.any(bad):
-        for g in np.where(bad)[0]:
-            _, dmat, _ = ldl(A[g], lower=True, hermitian=True)
-            diag = np.abs(np.diag(dmat))
-            diag = np.where(diag > eps, diag, eps)
-            out[g] = -0.5 * np.sum(np.log(diag))
-
-    return out
+from .glm_kernels import adj_profile_ll_mat
 
 
 def adjusted_profile_lik_grid(grid_dispersions, y, design, offset, weights=None):
-    """Evaluate APL at multiple dispersion grid points efficiently.
+    """Adjusted profile log-likelihoods at each of a grid of dispersions.
 
-    Optimized version that avoids per-call overhead of glm_fit by directly
-    calling mglm_one_group and precomputing shared quantities.
-
-    Parameters
-    ----------
-    grid_dispersions : ndarray of shape (ngrid,)
-        Grid of dispersion values.
-    y : ndarray (ngenes, nlibs)
-        Count matrix.
-    design : ndarray (nlibs, ncoefs)
-        Design matrix.
-    offset : ndarray (ngenes, nlibs)
-        Offset matrix.
-    weights : ndarray (ngenes, nlibs), optional
-        Observation weights.
-
-    Returns
-    -------
-    ndarray of shape (ngenes, ngrid) — APL values.
+    Equivalent to calling adjusted_profile_lik once per grid point, as
+    edgeR's estimateDisp does. grid_dispersions is (ngrid,) for common grid
+    values or (ngenes, ngrid) for genewise ones. Returns (ngenes, ngrid).
     """
-    from .glm_fit import mglm_one_group, _expand_to_matrix
-    from .utils import design_as_factor
-
     y = np.asarray(y, dtype=np.float64)
     if y.ndim == 1:
         y = y.reshape(1, -1)
-    ngenes, nlibs = y.shape
-    design = np.asarray(design, dtype=np.float64)
-    if design.ndim == 1:
-        design = design.reshape(-1, 1)
-    ncoefs = design.shape[1]
-
-    offset = np.asarray(offset, dtype=np.float64)
-    if offset.ndim == 1:
-        offset = np.tile(offset, (ngenes, 1))
-
-    if weights is not None:
-        w = np.asarray(weights, dtype=np.float64)
-        if w.ndim == 1:
-            w = np.tile(w, (ngenes, 1))
-    else:
-        w = np.ones_like(y)
-
     grid_dispersions = np.asarray(grid_dispersions, dtype=np.float64)
-    # Support both (ngrid,) scalar-per-grid and (ngenes, ngrid) per-gene-per-grid
-    disp_2d = grid_dispersions.ndim == 2
     ngrid = grid_dispersions.shape[-1]
-
-    # Precompute group structure (same for all grid points)
-    group = design_as_factor(design)
-    unique_groups = np.unique(group)
-    ngroups = len(unique_groups)
-    is_oneway = ngroups == ncoefs
-
-    # Precompute group column indices
-    group_cols = [np.where(group == grp)[0] for grp in unique_groups]
-
-    # Check if design is indicator (no back-solve needed)
-    first_of_group = np.array([cols[0] for cols in group_cols])
-    design_unique = design[first_of_group]
-    is_indicator = (np.sum(design_unique == 1) == ngroups and
-                    np.sum(design_unique == 0) == (ngroups - 1) * ngroups)
-
-    # Precompute gammaln(y+1) — same for all dispersions
-    lgamma_y1 = gammaln(y + 1)
-
-    # Output
-    apl = np.empty((ngenes, ngrid), dtype=np.float64)
-
+    apl = np.empty((y.shape[0], ngrid), dtype=np.float64)
     for gi in range(ngrid):
-        # d is (ngenes,) for per-gene dispersions or a scalar for grid dispersions
-        if disp_2d:
-            d = grid_dispersions[:, gi]          # (ngenes,)
-        else:
-            d = np.full(ngenes, grid_dispersions[gi])  # (ngenes,)
-
-        if is_oneway:
-            # Fit each group with mglm_one_group directly
-            mu = np.empty_like(y)
-            for g_idx, cols in enumerate(group_cols):
-                y_g = y[:, cols]
-                off_g = offset[:, cols]
-                w_g = w[:, cols]
-                disp_g = d[:, None] * np.ones(len(cols))
-                b = mglm_one_group(y_g, dispersion=disp_g, offset=off_g,
-                                   weights=w_g)
-                for jj in cols:
-                    mu[:, jj] = np.exp(np.clip(b + offset[:, jj], -500, 500))
-        else:
-            # General case: fall back to full glm_fit
-            from .glm_fit import glm_fit
-            fit = glm_fit(y, design=design, dispersion=d, offset=offset,
-                          weights=weights, prior_count=0)
-            mu = fit['fitted.values']
-
-        # NB log-likelihood (vectorized over genes)
-        mu_safe = np.maximum(mu, 1e-300)
-        r = 1.0 / np.maximum(d, 1e-300)   # (ngenes,)
-        r_col = r[:, None]                  # (ngenes, 1)
-
-        ll = np.sum(w * (gammaln(y + r_col) - gammaln(r_col) - lgamma_y1
-                    + r_col * np.log(r_col) + y * np.log(mu_safe)
-                    - (r_col + y) * np.log(r_col + mu_safe)), axis=1)
-
-        # Cox-Reid adjustment: -0.5 * log|X'WX|
-        working_w = w * mu_safe / (1.0 + d[:, None] * mu_safe)
-        working_w = np.maximum(working_w, 1e-300)
-
-        XtWX = np.einsum('gj,jk,jl->gkl', working_w, design, design)
-
-        apl[:, gi] = ll + _cox_reid_adjust_from_xtwx(XtWX)
-
+        d = grid_dispersions[:, gi] if grid_dispersions.ndim == 2 else grid_dispersions[gi]
+        apl[:, gi] = adjusted_profile_lik(d, y, design, offset, weights=weights)
     return apl
-
-
-def _apl_sum_oneway_scalar(dispersion, y, design, offset, w, group_cols, lgamma_y1):
-    """Fast sum of Cox-Reid adjusted profile log-likelihood for one-way designs."""
-    from .glm_fit import mglm_one_group
-
-    y = np.asarray(y, dtype=np.float64)
-    offset = np.asarray(offset, dtype=np.float64)
-    w = np.asarray(w, dtype=np.float64)
-    ngenes, _ = y.shape
-    ncoefs = design.shape[1]
-
-    d = float(max(dispersion, 1e-300))
-    mu = np.empty_like(y, dtype=np.float64)
-
-    # Fit each group independently via one-group Fisher scoring.
-    for cols in group_cols:
-        y_g = y[:, cols]
-        off_g = offset[:, cols]
-        w_g = w[:, cols]
-        disp_g = np.full_like(y_g, d)
-        b = mglm_one_group(y_g, dispersion=disp_g, offset=off_g, weights=w_g)
-        mu[:, cols] = np.exp(np.clip(b[:, None] + off_g, -500, 500))
-
-    mu_safe = np.maximum(mu, 1e-300)
-    r = 1.0 / d
-    ll = np.sum(w * (gammaln(y + r) - gammaln(r) - lgamma_y1
-                + r * np.log(r) + y * np.log(mu_safe)
-                - (r + y) * np.log(r + mu_safe)), axis=1)
-
-    working_w = np.maximum(w * mu_safe / (1.0 + d * mu_safe), 1e-300)
-    XtWX = np.einsum('gj,jk,jl->gkl', working_w, design, design)
-
-    return float(np.sum(ll + _cox_reid_adjust_from_xtwx(XtWX)))
 
 
 def adjusted_profile_lik(dispersion, y, design, offset, weights=None,
@@ -254,7 +73,6 @@ def adjusted_profile_lik(dispersion, y, design, offset, weights=None,
     design = np.asarray(design, dtype=np.float64)
     if design.ndim == 1:
         design = design.reshape(-1, 1)
-    ncoefs = design.shape[1]
 
     offset = np.asarray(offset, dtype=np.float64)
     if offset.ndim == 1:
@@ -273,57 +91,18 @@ def adjusted_profile_lik(dispersion, y, design, offset, weights=None,
     else:
         w = np.ones_like(y)
 
-    # Fit GLM to get mu.
-    # Fast path for one-way designs avoids glm_fit bookkeeping overhead.
-    from .glm_fit import glm_fit, mglm_one_way
-    from .utils import design_as_factor
-    group = design_as_factor(design)
-    is_oneway = (len(np.unique(group)) == ncoefs)
+    # Fitted values from edgeR's GLM fit (fit_apl): one-way or Levenberg,
+    # without prior counts
+    from .glm_fit import glm_fit
+    fit = glm_fit(y, design=design, dispersion=disp, offset=offset,
+                  weights=weights, prior_count=0, start=start)
+    mu = np.ascontiguousarray(fit['fitted.values'], dtype=np.float64)
+    beta = fit['coefficients']
 
-    if is_oneway:
-        fit = mglm_one_way(y, design=design, group=group, dispersion=disp,
-                           offset=offset, weights=weights, coef_start=start)
-        mu = fit['fitted.values']
-        beta = fit['coefficients']
-    else:
-        fit = glm_fit(y, design=design, dispersion=disp, offset=offset,
-                      weights=weights, prior_count=0, start=start)
-        mu = fit['fitted.values']
-        beta = fit.get('unshrunk.coefficients', fit['coefficients'])
-
-    # Compute adjusted profile log-likelihood for all genes (vectorized)
-    mu_safe = np.maximum(mu, 1e-300)  # (ngenes, nlibs)
-    r = 1.0 / np.maximum(disp, 1e-300)  # (ngenes,)
-    is_nb = disp > 0
-
-    # NB log-likelihood (vectorized)
-    r_col = r[:, None]  # (ngenes, 1)
-    ll = np.zeros(ngenes)
-    if np.any(is_nb):
-        nb = is_nb
-        ll[nb] = np.sum(w[nb] * (gammaln(y[nb] + r_col[nb]) - gammaln(r_col[nb])
-                    - gammaln(y[nb] + 1)
-                    + r_col[nb] * np.log(r_col[nb]) + y[nb] * np.log(mu_safe[nb])
-                    - (r_col[nb] + y[nb]) * np.log(r_col[nb] + mu_safe[nb])), axis=1)
-    if np.any(~is_nb):
-        pois = ~is_nb
-        ll[pois] = np.sum(w[pois] * (y[pois] * np.log(mu_safe[pois])
-                    - mu_safe[pois] - gammaln(y[pois] + 1)), axis=1)
-
-    # Cox-Reid adjustment: -0.5 * log|X'WX| (vectorized)
-    # Working weights: mu / (1 + d*mu) for NB, mu for Poisson
-    disp_col = disp[:, None]  # (ngenes, 1)
-    working_w = np.where(is_nb[:, None],
-                         w * mu_safe / (1.0 + disp_col * mu_safe),
-                         w * mu_safe)
-    working_w = np.maximum(working_w, 1e-300)  # (ngenes, nlibs)
-
-    # Compute X'WX for all genes at once using einsum
-    # XtWX[g, k, l] = sum_j working_w[g,j] * design[j,k] * design[j,l]
-    XtWX = np.einsum('gj,jk,jl->gkl', working_w, design, design)  # (ngenes, ncoefs, ncoefs)
-
-    cr_adj = _cox_reid_adjust_from_xtwx(XtWX)
-    apl = ll + cr_adj
+    disp_mat = np.ascontiguousarray(np.broadcast_to(disp[:, None], y.shape), dtype=np.float64)
+    apl = adj_profile_ll_mat(np.ascontiguousarray(y), mu, disp_mat,
+                             np.ascontiguousarray(np.broadcast_to(w, y.shape), dtype=np.float64),
+                             np.ascontiguousarray(design), True)
 
     if get_coef:
         return {'apl': apl, 'beta': beta}
@@ -663,40 +442,13 @@ def disp_cox_reid(y, design=None, offset=None, weights=None, ave_log_cpm_vals=No
         if weights is not None and weights.ndim == 2:
             weights = weights[i]
 
-    # Function to optimize.
-    # Fast path: one-way designs can evaluate APL sum without generic glm_fit overhead.
-    from .utils import design_as_factor
-    group = design_as_factor(design)
-    is_oneway = len(np.unique(group)) == design.shape[1]
+    def fun(par):
+        return -np.sum(adjusted_profile_lik(par ** 4, y, design, offset, weights=weights))
 
-    if weights is None:
-        w = np.ones_like(y)
-    else:
-        w = np.asarray(weights, dtype=np.float64)
-        if w.ndim == 1:
-            w = np.tile(w, (y.shape[0], 1))
-
-    if is_oneway:
-        unique_groups = np.unique(group)
-        group_cols = [np.where(group == grp)[0] for grp in unique_groups]
-        lgamma_y1 = gammaln(y + 1)
-
-        def fun(par):
-            disp = par ** 4
-            return -_apl_sum_oneway_scalar(disp, y, design, offset, w, group_cols, lgamma_y1)
-    else:
-        def fun(par):
-            disp = par ** 4
-            return -np.sum(adjusted_profile_lik(disp, y, design, offset, weights=weights))
-
-    # Optimize
-    lo = interval[0] ** 0.25
-    hi = interval[1] ** 0.25
-    if lo == 0:
-        lo = 1e-10
-    result = minimize_scalar(fun, bounds=(lo, hi), method='bounded',
-                             options={'xatol': tol})
-    return result.x ** 4
+    # Optimize over par = dispersion^0.25 with R's optimize(), as edgeR does
+    from .utils import optimize_brent
+    par = optimize_brent(fun, min(interval) ** 0.25, max(interval) ** 0.25, tol=tol)
+    return par ** 4
 
 
 def disp_cox_reid_interpolate_tagwise(y, design, offset=None, dispersion=None,

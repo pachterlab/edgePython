@@ -377,11 +377,12 @@ def leven_start(y, offset, disp, w, design, use_null=True):
     if use_null:
         lib = np.exp(offset)
         curweight = w * lib / (1.0 + disp * lib)
-        with np.errstate(divide='ignore', invalid='ignore'):
-            level = np.log(np.sum(y * curweight / lib, axis=1) / np.sum(curweight, axis=1))
         q, r = np.linalg.qr(design)
         unit = np.linalg.solve(r, q.T @ np.ones(nlibs))
-        return level[:, None] * unit[None, :]
+        # All-zero genes give -Inf here; the fit returns NA for them anyway
+        with np.errstate(divide='ignore', invalid='ignore'):
+            level = np.log(np.sum(y * curweight / lib, axis=1) / np.sum(curweight, axis=1))
+            return level[:, None] * unit[None, :]
 
     delta = min(float(np.max(y)), 1.0 / 6.0)
     z = np.log(np.maximum(delta, y)) - offset
@@ -394,3 +395,156 @@ def leven_start(y, offset, disp, w, design, use_null=True):
         q, r = np.linalg.qr(design * sw[g][:, None])
         beta[g] = np.linalg.solve(r, q.T @ (z[g] * sw[g]))
     return beta
+
+
+@njit(cache=True)
+def _idamax(x):
+    """Index of the first element of largest absolute value (BLAS idamax)."""
+    best = 0
+    bmax = -1.0
+    for i in range(x.shape[0]):
+        v = abs(x[i])
+        if v > bmax:
+            bmax = v
+            best = i
+    return best
+
+
+@njit(cache=True)
+def _dsytf2_upper(a):
+    """Bunch-Kaufman factorization U D U' of a symmetric matrix, in place.
+
+    Port of LAPACK's unblocked dsytf2 with uplo = 'U' (dsytrf calls it for
+    matrices smaller than its block size). Only the upper triangle of a is
+    read. On exit the diagonal of a holds the 1x1 pivots of D and the
+    diagonals of its 2x2 blocks, which edgeR reads for the Cox-Reid term.
+    """
+    n = a.shape[0]
+    alpha = (1.0 + math.sqrt(17.0)) / 8.0
+    k = n - 1
+    while k >= 0:
+        kstep = 1
+        absakk = abs(a[k, k])
+        imax = 0
+        colmax = 0.0
+        if k > 0:
+            imax = _idamax(a[:k, k])
+            colmax = abs(a[imax, k])
+        if max(absakk, colmax) == 0.0 or math.isnan(absakk):
+            k -= 1
+            continue
+        if absakk >= alpha * colmax:
+            kp = k
+        else:
+            jmax = imax + 1 + _idamax(a[imax, imax + 1:k + 1])
+            rowmax = abs(a[imax, jmax])
+            if imax > 0:
+                jmax = _idamax(a[:imax, imax])
+                rowmax = max(rowmax, abs(a[jmax, imax]))
+            if absakk >= alpha * colmax * (colmax / rowmax):
+                kp = k
+            elif abs(a[imax, imax]) >= alpha * rowmax:
+                kp = imax
+            else:
+                kp = imax
+                kstep = 2
+        kk = k - kstep + 1
+        if kp != kk:
+            # Interchange rows and columns kk and kp in the leading submatrix
+            for i in range(kp):
+                t = a[i, kk]
+                a[i, kk] = a[i, kp]
+                a[i, kp] = t
+            for j in range(kp + 1, kk):
+                t = a[j, kk]
+                a[j, kk] = a[kp, j]
+                a[kp, j] = t
+            t = a[kk, kk]
+            a[kk, kk] = a[kp, kp]
+            a[kp, kp] = t
+            if kstep == 2:
+                t = a[k - 1, k]
+                a[k - 1, k] = a[kp, k]
+                a[kp, k] = t
+        if kstep == 1:
+            # Rank-1 update of the leading submatrix (dsyr), then scale
+            r1 = 1.0 / a[k, k]
+            for j in range(k):
+                if a[j, k] != 0.0:
+                    temp = -r1 * a[j, k]
+                    for i in range(j + 1):
+                        a[i, j] += a[i, k] * temp
+            for i in range(k):
+                a[i, k] *= r1
+        elif k > 1:
+            # Rank-2 update with the 2x2 pivot block
+            d12 = a[k - 1, k]
+            d22 = a[k - 1, k - 1] / d12
+            d11 = a[k, k] / d12
+            t = 1.0 / (d11 * d22 - 1.0)
+            d12 = t / d12
+            for j in range(k - 2, -1, -1):
+                wkm1 = d12 * (d11 * a[j, k - 1] - a[j, k])
+                wk = d12 * (d22 * a[j, k] - a[j, k - 1])
+                for i in range(j, -1, -1):
+                    a[i, j] = a[i, j] - a[i, k] * wk - a[i, k - 1] * wkm1
+                a[j, k] = wk
+                a[j, k - 1] = wkm1
+        k -= kstep
+
+
+@njit(cache=True, parallel=True)
+def adj_profile_ll_mat(y, mu, disp, w, design, adjust):
+    """Cox-Reid adjusted profile log-likelihoods (compute_adj_profile_ll).
+
+    Libraries with mu = 0 contribute nothing. Weights enter as mu * w,
+    y * w and dispersion / w. The adjustment is log|sum of working weights|/2
+    for one coefficient; otherwise half the sum of the logs of the diagonal
+    of the Bunch-Kaufman factor of X'WX, with log(1e-10) for any entry
+    below 1e-10.
+    """
+    ngenes, nlibs = y.shape
+    nvar = design.shape[1]
+    log_low = math.log(1e-10)
+    out = np.empty(ngenes)
+    for g in prange(ngenes):
+        zw = np.zeros(nlibs)
+        s = 0.0
+        for j in range(nlibs):
+            if mu[g, j] == 0.0:
+                continue
+            curw = w[g, j]
+            curu = mu[g, j] * curw
+            cury = y[g, j] * curw
+            curd = disp[g, j] / curw
+            if curd > 0.0:
+                r = 1.0 / curd
+                logmur = math.log(curu + r)
+                s += (cury * math.log(curu) - cury * logmur + r * math.log(r) - r * logmur
+                      + math.lgamma(cury + r) - math.lgamma(cury + 1.0) - math.lgamma(r))
+            else:
+                s += cury * math.log(curu) - curu - math.lgamma(cury + 1.0)
+            zw[j] = curu / (1.0 + curd * curu)
+        if adjust:
+            adj = 0.0
+            if nvar == 1:
+                for j in range(nlibs):
+                    adj += zw[j]
+                adj = math.log(abs(adj)) / 2.0
+            else:
+                a = np.zeros((nvar, nvar))
+                for c1 in range(nvar):
+                    for c2 in range(c1 + 1):
+                        t = 0.0
+                        for j in range(nlibs):
+                            t += design[j, c1] * design[j, c2] * zw[j]
+                        a[c2, c1] = t
+                _dsytf2_upper(a)
+                for i in range(nvar):
+                    if a[i, i] < 1e-10:
+                        adj += log_low
+                    else:
+                        adj += math.log(a[i, i]) * 0.5
+            s -= adj
+        out[g] = s
+    return out

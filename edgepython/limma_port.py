@@ -761,8 +761,8 @@ def _fit_f_dist_unequal_df1(x, df1, covariate=None, span=None, robust=True, prio
     -------
     dict with keys: scale, df2, and optionally df2_shrunk, df2_outlier.
     """
-    from scipy.optimize import minimize_scalar
     from scipy.special import gammaln
+    from .utils import optimize_brent
 
     x = np.asarray(x, dtype=np.float64).copy()
     df1 = np.atleast_1d(np.asarray(df1, dtype=np.float64)).copy()
@@ -826,15 +826,8 @@ def _fit_f_dist_unequal_df1(x, df1, covariate=None, span=None, robust=True, prio
         covariate = np.asarray(covariate, dtype=np.float64)
         if span is None:
             span = choose_lowess_span(n, small_n=500)
-        # Normalize weights: w / quantile(w, 0.75), clipped to [1e-8, 100]
-        w_q75 = np.quantile(w, 0.75)
-        loess_w = w / w_q75 if w_q75 > 0 else w.copy()
-        loess_w = np.clip(loess_w, 1e-08, 100)
-
-        from .weighted_lowess import weighted_lowess as _wlowess
-        wl_result = _wlowess(covariate, e, weights=loess_w, span=span,
-                             iterations=1, npts=200)
-        emean = wl_result['fitted']
+        emean = _loess_fit(e, covariate, weights=w / np.quantile(w, 0.75),
+                           span=span, iterations=1, min_weight=1e-8, max_weight=1e2)
 
     d1x = d1 * xpos
 
@@ -850,8 +843,10 @@ def _fit_f_dist_unequal_df1(x, df1, covariate=None, span=None, robust=True, prio
             return -2 * np.sum(prior_weights * ll)
         return -2 * np.sum(ll)
 
-    opt = minimize_scalar(minus_twice_loglik, bounds=(0.5, 0.9998), method='bounded')
-    d2 = opt.x / (1 - opt.x)
+    # R's optimize(); the estimate is often at the upper bound, where the
+    # answer depends on exactly where the search stops
+    par = optimize_brent(minus_twice_loglik, 0.5, 0.9998)
+    d2 = par / (1 - par)
     s20 = np.exp(emean - logmdigamma(d2))
 
     if not robust:
@@ -948,10 +943,45 @@ def is_fullrank(x):
     return np.linalg.matrix_rank(x) == x.shape[1]
 
 
-def choose_lowess_span(n, small_n=25, min_span=0.2, power=1/3):
+def _loess_fit(y, x, weights=None, span=0.3, iterations=4, min_weight=1e-5,
+               max_weight=1e5):
+    """Fitted values of limma's loessFit() for finite y and x.
+
+    With unequal weights this is weightedLowess (npts = 200). Equal or no
+    weights fall back to lowess(iter = iterations - 1), and too few
+    weighted points to a weighted straight line, as in limma.
+    """
+    from statsmodels.nonparametric.smoothers_lowess import lowess as _sm_lowess
+    y = np.asarray(y, dtype=np.float64)
+    x = np.asarray(x, dtype=np.float64)
+    n = len(y)
+    if span < 1 / n:
+        return y.copy()
+    if weights is not None:
+        w = np.clip(np.nan_to_num(np.asarray(weights, dtype=np.float64)),
+                    max(min_weight, 0), max_weight)
+        if np.ptp(w) < 1e-15:
+            weights = None
+    if weights is None:
+        return _sm_lowess(y, x, frac=span, it=iterations - 1, delta=0.01 * np.ptp(x),
+                          is_sorted=False, missing='none', return_sorted=False)
+    nw = n if min_weight > 0 else int(np.sum(w > 0))
+    if nw < 4 + 1 / span:
+        if nw == 1:
+            return np.full(n, y[w > 0][0])
+        sw = np.sqrt(w)
+        X = np.column_stack([np.ones(n), x])
+        coef = np.linalg.lstsq(X * sw[:, None], y * sw, rcond=None)[0]
+        return X @ coef
+    from .weighted_lowess import weighted_lowess
+    return weighted_lowess(x, y, weights=w, span=span, iterations=iterations,
+                           npts=200)['fitted']
+
+
+def choose_lowess_span(n=1000, small_n=50, min_span=0.3, power=1/3):
     """Choose lowess span based on number of observations.
 
-    Port of limma's chooseLowessSpan().
+    Port of limma's chooseLowessSpan(), with its defaults.
     Formula: min(min_span + (1 - min_span) * (small_n/n)^power, 1)
     """
     return min(min_span + (1 - min_span) * (small_n / n) ** power, 1.0)
