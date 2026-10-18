@@ -175,6 +175,10 @@ def estimate_disp(y, design=None, group=None, lib_size=None, offset=None,
     # DGEList input
     if isinstance(y, dict) and 'counts' in y:
         dge = y
+        if weights is not None:
+            # Weights given explicitly act as the DGEList's own weights
+            dge = type(dge)(dge)
+            dge['weights'] = weights
         from .dgelist import valid_dgelist, get_offset
         dge = valid_dgelist(dge)
         group_val = dge['samples']['group'].values
@@ -815,6 +819,10 @@ def estimate_glm_common_disp(y, design=None, offset=None, method='CoxReid',
     # DGEList input
     if isinstance(y, dict) and 'counts' in y:
         dge = y
+        if weights is not None:
+            # Weights given explicitly act as the DGEList's own weights
+            dge = type(dge)(dge)
+            dge['weights'] = weights
         from .dgelist import valid_dgelist, get_offset
         dge = valid_dgelist(dge)
         alc = ave_log_cpm(dge, dispersion=0.05)
@@ -892,6 +900,10 @@ def estimate_glm_trended_disp(y, design=None, offset=None,
     # DGEList input
     if isinstance(y, dict) and 'counts' in y:
         dge = y
+        if weights is not None:
+            # Weights given explicitly act as the DGEList's own weights
+            dge = type(dge)(dge)
+            dge['weights'] = weights
         if dge.get('AveLogCPM') is None:
             dge['AveLogCPM'] = ave_log_cpm(dge)
         from .dgelist import get_offset
@@ -970,6 +982,10 @@ def estimate_glm_tagwise_disp(y, design=None, offset=None, dispersion=None,
     # DGEList input
     if isinstance(y, dict) and 'counts' in y:
         dge = y
+        if weights is not None:
+            # Weights given explicitly act as the DGEList's own weights
+            dge = type(dge)(dge)
+            dge['weights'] = weights
         if trend is None:
             trend = dge.get('trended.dispersion') is not None
         if trend:

@@ -200,6 +200,11 @@ def ave_log_cpm(y, lib_size=None, offset=None, prior_count=2, dispersion=None,
 
     Port of edgeR's aveLogCPM().
     """
+    if weights is not None and isinstance(y, dict) and 'counts' in y:
+        # Weights given explicitly act as the object's own weights
+        y = type(y)(y)
+        y['weights'] = weights
+
     # PCList input: log2 CPM of the total coverage (aveLogCPM.PCList)
     if isinstance(y, dict) and 'counts2' in y and 'coefficients' not in y:
         total = np.asarray(y['counts'], dtype=np.float64) + np.asarray(y['counts2'], dtype=np.float64)
@@ -295,6 +300,10 @@ def cpm_by_group(y, group=None, dispersion=0.05, offset=None, weights=None,
     # DGEList input
     if isinstance(y, dict) and 'counts' in y:
         dge = y
+        if weights is not None:
+            # Weights given explicitly act as the DGEList's own weights
+            dge = type(dge)(dge)
+            dge['weights'] = weights
         if group is None:
             group = dge['samples']['group'].values
         if offset is None:

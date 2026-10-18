@@ -1153,3 +1153,40 @@ def test_pclist_mds_and_dgebin_md_plots(bin_fits):
     ep.plot_md(bin_fits["weights"])
     assert plt.gcf().axes[0].get_ylabel() == "log-odds-ratio"
     plt.close("all")
+
+
+_WEIGHTED_CALLS = {
+    "glm_fit": (lambda y, w: ep.glm_fit(y, _as_array(INPUTS["oneway"]), weights=w), "coefficients"),
+    "glm_ql_fit": (lambda y, w: ep.glm_ql_fit(y, _as_array(INPUTS["oneway"]), weights=w), "coefficients"),
+    "estimate_disp": (lambda y, w: ep.estimate_disp(y, _as_array(INPUTS["oneway"]), weights=w), "tagwise.dispersion"),
+    "estimate_glm_common_disp": (lambda y, w: ep.estimate_glm_common_disp(y, _as_array(INPUTS["oneway"]), weights=w),
+                                 "common.dispersion"),
+    "estimate_glm_trended_disp": (lambda y, w: ep.estimate_glm_trended_disp(y, _as_array(INPUTS["oneway"]), weights=w),
+                                  "trended.dispersion"),
+    "ave_log_cpm": (lambda y, w: ep.ave_log_cpm(y, weights=w), None),
+    "cpm_by_group": (lambda y, w: ep.cpm_by_group(y, weights=w), None),
+    "bin_fit": (lambda y, w: ep.bin_fit(y, weights=w), "coefficients"),
+    "bin_ql_fit": (lambda y, w: ep.bin_ql_fit(y, weights=w), "s2.post"),
+}
+
+
+@pytest.mark.parametrize("name", list(_WEIGHTED_CALLS))
+def test_weights_argument_with_a_dgelist(name):
+    # Weights passed alongside a DGEList (or PCList) act as its own weights.
+    # edgeR's DGEList methods fail with "matched by multiple actual
+    # arguments"; edgePython used to ignore them silently.
+    call, key = _WEIGHTED_CALLS[name]
+    if name.startswith("bin"):
+        y = _pclist()
+        w = BIN_WEIGHTS
+    else:
+        y = ep.calc_norm_factors(ep.make_dgelist(COUNTS, group=np.repeat(["A", "B", "C"], 3)))
+        if name == "glm_fit" or name == "glm_ql_fit":
+            y = ep.estimate_disp(y)
+        w = WEIGHTS
+    value = (lambda r: np.asarray(r if key is None else r[key], dtype=float))
+    stored = type(y)(y)
+    stored["weights"] = w
+    with_arg = value(call(y, w))
+    np.testing.assert_allclose(with_arg, value(call(stored, None)), rtol=1e-13)
+    assert not np.allclose(with_arg, value(call(y, None)))

@@ -204,6 +204,11 @@ def glm_fit(y, design=None, dispersion=None, offset=None, lib_size=None,
     # DGEList input
     if isinstance(y, dict) and 'counts' in y:
         dge = y
+        if weights is not None:
+            # Weights given explicitly act as the DGEList's own weights
+            # (edgeR's DGEList method fails when given both)
+            dge = type(dge)(dge)
+            dge['weights'] = weights
         if design is None:
             design = dge.get('design')
             if design is None:
@@ -380,6 +385,11 @@ def glm_ql_fit(y, design=None, dispersion=None, offset=None, lib_size=None,
     # DGEList input
     if isinstance(y, dict) and 'counts' in y:
         dge = y
+        if weights is not None:
+            # Weights given explicitly act as the DGEList's own weights
+            # (edgeR's DGEList method fails when given both)
+            dge = type(dge)(dge)
+            dge['weights'] = weights
         if design is None:
             design = dge.get('design')
             if design is None:

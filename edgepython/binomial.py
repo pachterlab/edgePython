@@ -514,6 +514,23 @@ def _pclist_design(y, design):
     return design
 
 
+def _with_weights(y, weights):
+    """Weights given explicitly act as the PCList's own weights."""
+    if weights is None:
+        return y
+    y = type(y)(y)
+    y["weights"] = weights
+    return y
+
+
+def _pclist_ave_log_cpm(y):
+    """y['AveLogCPM'], or aveLogCPM of the PCList (without storing it in y)."""
+    if y.get("AveLogCPM") is not None:
+        return y["AveLogCPM"]
+    from .expression import ave_log_cpm
+    return ave_log_cpm(y)
+
+
 def _names(y):
     """Row and column names of a counts matrix, if it has them."""
     if isinstance(y, pd.DataFrame):
@@ -797,15 +814,13 @@ def bin_fit(y, counts2=None, design=None, weights=None, offset=None, prior_count
     deviance, df.residual and the inputs.
     """
     if isinstance(y, dict) and "counts2" in y:
+        y = _with_weights(y, weights)
         design = _pclist_design(y, design)
-        if y.get("AveLogCPM") is None:
-            from .expression import ave_log_cpm
-            y["AveLogCPM"] = ave_log_cpm(y)
         fit = _bin_fit_default(y["counts"], y["counts2"], design=design, weights=y.get("weights"),
                                offset=offset, prior_count=prior_count)
         fit["samples"] = y["samples"]
         fit["genes"] = y.get("genes")
-        fit["AveLogCPM"] = y["AveLogCPM"]
+        fit["AveLogCPM"] = _pclist_ave_log_cpm(y)
         return fit
     if counts2 is None:
         raise ValueError("counts2 must be given when y is not a PCList")
@@ -877,12 +892,10 @@ def bin_ql_fit(y, counts2=None, design=None, weights=None, offset=None, ave_log_
     s2.post, s2.prior and average.ql.dispersion.
     """
     if isinstance(y, dict) and "counts2" in y:
+        y = _with_weights(y, weights)
         design = _pclist_design(y, design)
-        if y.get("AveLogCPM") is None:
-            from .expression import ave_log_cpm as _alc
-            y["AveLogCPM"] = _alc(y)
         fit = _bin_ql_fit_default(y["counts"], y["counts2"], design=design, weights=y.get("weights"),
-                                  offset=offset, ave_log_cpm=y["AveLogCPM"],
+                                  offset=offset, ave_log_cpm=_pclist_ave_log_cpm(y),
                                   abundance_trend=abundance_trend, covariate_trend=covariate_trend,
                                   robust=robust, prior_count=prior_count)
         fit["samples"] = y["samples"]
