@@ -120,6 +120,170 @@ def optimize_brent(f, lower, upper, tol=np.finfo(float).eps ** 0.25):
     return x
 
 
+def optim_nelder_mead(f, par, maxit=500, reltol=np.sqrt(np.finfo(float).eps),
+                      abstol=-np.inf, alpha=1.0, beta=0.5, gamma=2.0):
+    """Minimize f as R's optim(method = "Nelder-Mead") does.
+
+    Port of R's nmmin (src/appl/optim.c) with optim's defaults: the initial
+    simplex steps each coordinate by 10% of the largest |par| (0.1 if all
+    are 0), and the search stops when the simplex's function values are
+    within reltol * (|f(par)| + reltol) or after maxit evaluations.
+    Non-finite values are replaced by 1e35. Returns (par, value).
+    """
+    big = 1.0e35
+    b = np.array(par, dtype=np.float64)
+    n = b.size
+    fv = f(b)
+    if not np.isfinite(fv):
+        raise ValueError("function cannot be evaluated at initial parameters")
+    convtol = reltol * (abs(fv) + reltol)
+    n1 = n + 1
+    # P[:n, j] are the vertices, P[n, j] their values; column n + 1 holds the
+    # centroid
+    P = np.zeros((n + 1, n + 2))
+    P[n, 0] = fv
+    P[:n, 0] = b
+    L = 0
+    step = 0.1 * np.max(np.abs(b)) if n else 0.0
+    if step == 0.0:
+        step = 0.1
+    size = 0.0
+    for j in range(1, n1):
+        P[:n, j] = b
+        trystep = step
+        while P[j - 1, j] == b[j - 1]:
+            P[j - 1, j] = b[j - 1] + trystep
+            trystep *= 10
+        size += trystep
+    oldsize = size
+    funcount = 1
+    calcvert = True
+
+    def evaluate(x):
+        v = f(x)
+        return v if np.isfinite(v) else big
+
+    while True:
+        if calcvert:
+            for j in range(n1):
+                if j != L:
+                    P[n, j] = evaluate(P[:n, j].copy())
+                    funcount += 1
+            calcvert = False
+        VL = VH = P[n, L]
+        H = L
+        for j in range(n1):
+            if j != L:
+                v = P[n, j]
+                if v < VL:
+                    L, VL = j, v
+                if v > VH:
+                    H, VH = j, v
+        if VH <= VL + convtol or VL <= abstol:
+            break
+        # Centroid of the vertices other than H, summed in nmmin's order
+        temp = -P[:n, H].copy()
+        for j in range(n1):
+            temp += P[:n, j]
+        centroid = temp / n
+        P[:n, n1] = centroid
+        b = (1.0 + alpha) * centroid - alpha * P[:n, H]
+        VR = evaluate(b)
+        funcount += 1
+        if VR < VL:
+            P[n, n1] = VR
+            ext = gamma * b + (1 - gamma) * centroid
+            P[:n, n1] = b
+            fe = evaluate(ext)
+            funcount += 1
+            if fe < VR:
+                P[:n, H], P[n, H] = ext, fe
+            else:
+                P[:n, H], P[n, H] = P[:n, n1], VR
+        else:
+            if VR < VH:
+                P[:n, H], P[n, H] = b, VR
+            b = (1 - beta) * P[:n, H] + beta * P[:n, n1]
+            fc = evaluate(b)
+            funcount += 1
+            if fc < P[n, H]:
+                P[:n, H], P[n, H] = b, fc
+            elif VR >= VH:
+                # shrink towards the lowest vertex
+                calcvert = True
+                size = 0.0
+                for j in range(n1):
+                    if j != L:
+                        P[:n, j] = beta * (P[:n, j] - P[:n, L]) + P[:n, L]
+                        size += np.sum(np.abs(P[:n, j] - P[:n, L]))
+                if size < oldsize:
+                    oldsize = size
+                else:
+                    break
+        if funcount > maxit:
+            break
+    return P[:n, L].copy(), P[n, L]
+
+
+def uniroot_brent(f, lower, upper, tol=np.finfo(float).eps ** 0.25, maxiter=1000,
+                  f_lower=None, f_upper=None):
+    """Root of f in [lower, upper] as R's uniroot() finds it.
+
+    Port of R's R_zeroin2 (Brent's zeroin): bisection with secant and
+    inverse quadratic interpolation. f(lower) and f(upper) must have
+    opposite signs.
+    """
+    eps = np.finfo(float).eps
+    a, b = lower, upper
+    fa = f(a) if f_lower is None else f_lower
+    fb = f(b) if f_upper is None else f_upper
+    if fa * fb > 0:
+        raise ValueError("f() values at end points not of opposite sign")
+    c, fc = a, fa
+    if fa == 0.0:
+        return a
+    if fb == 0.0:
+        return b
+    for _ in range(maxiter + 1):
+        prev_step = b - a
+        if abs(fc) < abs(fb):
+            a, b, c = b, c, b
+            fa, fb, fc = fb, fc, fb
+        tol_act = 2 * eps * abs(b) + tol / 2
+        new_step = (c - b) / 2
+        if abs(new_step) <= tol_act or fb == 0.0:
+            return b
+        if abs(prev_step) >= tol_act and abs(fa) > abs(fb):
+            cb = c - b
+            if a == c:
+                # linear interpolation
+                t1 = fb / fa
+                p = cb * t1
+                q = 1.0 - t1
+            else:
+                # inverse quadratic interpolation
+                q = fa / fc
+                t1 = fb / fc
+                t2 = fb / fa
+                p = t2 * (cb * q * (q - t1) - (b - a) * (t1 - 1.0))
+                q = (q - 1.0) * (t1 - 1.0) * (t2 - 1.0)
+            if p > 0:
+                q = -q
+            else:
+                p = -p
+            if p < (0.75 * cb * q - abs(tol_act * q) / 2) and p < abs(prev_step * q / 2):
+                new_step = p / q
+        if abs(new_step) < tol_act:
+            new_step = tol_act if new_step > 0 else -tol_act
+        a, fa = b, fb
+        b += new_step
+        fb = f(b)
+        if (fb > 0 and fc > 0) or (fb < 0 and fc < 0):
+            c, fc = a, fa
+    warnings.warn("uniroot: iteration limit reached")
+    return b
+
+
 def add_prior_count(y, lib_size=None, offset=None, prior_count=1):
     """Add library-size-adjusted prior counts.
 
@@ -428,38 +592,46 @@ def cut_with_min_n(x, intervals=2, min_n=1):
     if intervals == 1:
         return {'group': np.ones(nx, dtype=int), 'breaks': None}
 
-    # Add jitter
-    x_jit = x + 1e-10 * (np.random.uniform(size=nx) - 0.5)
+    # Jitter to break ties, as edgeR does. edgeR's jitter is random; this
+    # one is fixed so that results are reproducible.
+    x = x + 1e-10 * (np.random.default_rng(0).uniform(size=nx) - 0.5)
 
-    # Try equally spaced
-    breaks = np.linspace(x_jit.min() - 1, x_jit.max() + 1, intervals + 1)
-    z = np.digitize(x_jit, breaks[1:-1])
-    n = np.bincount(z, minlength=intervals)
+    def cut(breaks):
+        # R's cut(): right-closed intervals (breaks[k-1], breaks[k]], and
+        # tabulate() counts up to the largest group present
+        z = np.searchsorted(breaks, x, side='left')
+        return z, np.bincount(z, minlength=z.max() + 1)[1:]
+
+    breaks_eqx = np.linspace(x.min(), x.max(), intervals + 1)
+    breaks_eqx[0] -= 1
+    breaks_eqx[-1] += 1
+    breaks_eqn = np.quantile(x, np.linspace(0, 1, intervals + 1))
+    breaks_eqn[0] -= 1
+    breaks_eqn[-1] += 1
+
+    # cut(x, breaks = intervals): equal widths over range(x), extended by
+    # 1/1000 of the range at each end
+    rx = (x.min(), x.max())
+    dx = rx[1] - rx[0]
+    breaks = np.linspace(rx[0], rx[1], intervals + 1)
+    breaks[0], breaks[-1] = rx[0] - dx / 1000, rx[1] + dx / 1000
+    z, n = cut(breaks)
     if np.all(n >= min_n):
-        return {'group': z + 1, 'breaks': breaks}
+        return {'group': z, 'breaks': breaks_eqx}
 
-    # Try quantile-based
-    quantiles = np.quantile(x_jit, np.linspace(0, 1, intervals + 1))
-    quantiles[0] -= 1
-    quantiles[-1] += 1
-
-    for w in np.linspace(0.1, 1.0, 10):
-        brk = w * quantiles + (1 - w) * breaks
-        z = np.digitize(x_jit, brk[1:-1])
-        n = np.bincount(z, minlength=intervals)
+    for i in range(1, 10):
+        breaks = (i * breaks_eqn + (10 - i) * breaks_eqx) / 10
+        z, n = cut(breaks)
         if np.all(n >= min_n):
-            return {'group': z + 1, 'breaks': brk}
+            return {'group': z, 'breaks': breaks}
 
-    # Fallback: order by x
-    o = np.argsort(x_jit)
-    n_per = nx // intervals
-    nresid = nx - intervals * n_per
-    sizes = np.full(intervals, n_per)
-    if nresid > 0:
-        sizes[:nresid] += 1
-    z = np.zeros(nx, dtype=int)
+    # Equal numbers per group, in order of x
+    o = np.argsort(x, kind='stable')
+    sizes = np.full(intervals, nx // intervals)
+    sizes[:nx - intervals * (nx // intervals)] += 1
+    z = np.empty(nx, dtype=int)
     z[o] = np.repeat(np.arange(1, intervals + 1), sizes)
-    return {'group': z, 'breaks': quantiles}
+    return {'group': z, 'breaks': breaks_eqn}
 
 
 def sum_tech_reps(x, ID=None):

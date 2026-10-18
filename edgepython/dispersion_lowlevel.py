@@ -506,9 +506,12 @@ def disp_cox_reid_interpolate_tagwise(y, design, offset=None, dispersion=None,
     offset = expand_as_matrix(np.asarray(offset, dtype=np.float64), y.shape)
 
     if ave_log_cpm_vals is None:
-        ave_log_cpm_vals = ave_log_cpm(y, offset=offset, weights=weights)
+        # As edgeR: library sizes are column sums unless offsets were given
+        ave_log_cpm_vals = ave_log_cpm(y)
 
-    dispersion = np.atleast_1d(np.asarray(dispersion, dtype=np.float64))
+    # A copy: the dispersions are updated below and must not change the
+    # caller's (e.g. a DGEList's trended.dispersion)
+    dispersion = np.array(dispersion, dtype=np.float64, ndmin=1)
     if len(dispersion) == 1:
         dispersion = np.full(ntags, dispersion[0])
     elif len(dispersion) != ntags:
@@ -601,6 +604,50 @@ def _ns_basis_with_knots(x, internal_knots, boundary_knots):
     return basis
 
 
+def _optim(fun, par0, method):
+    """R's optim(par0, fun, method = method): Nelder-Mead is ported exactly."""
+    if method == 'Nelder-Mead':
+        from .utils import optim_nelder_mead
+        return optim_nelder_mead(fun, par0)[0]
+    return minimize(fun, par0, method=method).x
+
+
+def _ns_r(x, knots, boundary_knots, intercept=False):
+    """R's splines::ns(x, knots = knots, intercept = intercept) for x within
+    the boundary knots.
+
+    A cubic B-spline basis on the boundary knots (each four times) and the
+    interior knots, with the first function dropped unless intercept, made
+    natural by projecting out the second derivatives at the boundaries with
+    the QR decomposition of the constraint matrix, as ns() does.
+    """
+    from scipy.interpolate import BSpline
+    x = np.asarray(x, dtype=np.float64)
+    bk = np.sort(np.asarray(boundary_knots, dtype=np.float64))
+    if np.any((x < bk[0]) | (x > bk[1])):
+        raise ValueError("x outside the boundary knots")
+    aknots = np.sort(np.concatenate([np.repeat(bk, 4), np.asarray(knots, dtype=np.float64)]))
+    nb = len(aknots) - 4
+
+    def design(points, deriv):
+        # splineDesign(); x is within the knots, where extrapolate=True
+        # also covers the right boundary knot
+        out = np.empty((len(points), nb))
+        for j in range(nb):
+            spl = BSpline(aknots, np.eye(nb)[j], 3, extrapolate=True)
+            out[:, j] = (spl.derivative(deriv) if deriv else spl)(points)
+        return out
+
+    basis = design(x, 0)
+    const = design(bk, 2)
+    if not intercept:
+        basis, const = basis[:, 1:], const[:, 1:]
+    q, _ = np.linalg.qr(const.T, mode='complete')
+    # Some BLAS builds raise spurious floating-point flags in matmul
+    with np.errstate(divide='ignore', over='ignore', invalid='ignore'):
+        return (q.T @ basis.T).T[:, 2:]
+
+
 def disp_cox_reid_spline_trend(y, design, offset=None, df=5, subset=10000,
                                 ave_log_cpm_vals=None, method_optim='Nelder-Mead'):
     """Estimate spline trend dispersion.
@@ -644,8 +691,9 @@ def disp_cox_reid_spline_trend(y, design, offset=None, df=5, subset=10000,
     knots2 = r[0] + p1 * (r[1] - r[0])
     knots = 0.3 * knots1 + 0.7 * knots2
 
-    # Build natural spline basis: cbind(1, ns(abundance, knots=knots))
-    X = _ns_basis_with_knots(abundance_nonzero, knots, boundary_knots=r)
+    # Natural spline basis exactly as R's cbind(1, ns(abundance, knots=knots)):
+    # Nelder-Mead's path depends on the basis, not just its span
+    X = np.column_stack([np.ones(len(abundance_nonzero)), _ns_r(abundance_nonzero, knots, r)])
 
     # Objective: negative sum of adjusted profile likelihoods
     def fun(par, y_sub, design, offset_sub, abundance_sub, X_sub):
@@ -661,13 +709,11 @@ def disp_cox_reid_spline_trend(y, design, offset=None, df=5, subset=10000,
     par0 = np.zeros(df + 1)
     par0[0] = np.median(abundance_nonzero[i]) + np.log(0.1)
 
-    result = minimize(fun, par0, args=(y_nonzero[i], design,
-                                        offset_nonzero[i], abundance_nonzero[i],
-                                        X[i]),
-                       method=method_optim)
+    par = _optim(lambda p: fun(p, y_nonzero[i], design, offset_nonzero[i],
+                               abundance_nonzero[i], X[i]), par0, method_optim)
 
     # Evaluate fitted dispersions for all genes
-    disp_nonzero = np.exp(X @ result.x - abundance_nonzero)
+    disp_nonzero = np.exp(X @ par - abundance_nonzero)
 
     disp = np.full(ntags, np.nan)
     disp[all_zero] = disp_nonzero[np.argmin(abundance_nonzero)] if len(disp_nonzero) > 0 else 0.1
@@ -694,7 +740,7 @@ def disp_cox_reid_power_trend(y, design, offset=None, ave_log_cpm_vals=None,
     ntags = y.shape[0]
 
     if offset is None:
-        offset = np.log(y.sum(axis=0))
+        offset = 0.0
     offset = expand_as_matrix(np.asarray(offset, dtype=np.float64), y.shape)
 
     if ave_log_cpm_vals is None:
@@ -721,14 +767,39 @@ def disp_cox_reid_power_trend(y, design, offset=None, ave_log_cpm_vals=None,
             return 1e10
 
     par0 = np.array([np.log(0.1), 0.0, -5.0])
-    result = minimize(fun, par0, args=(y_nonzero[i], design,
-                                        offset_nonzero[i], abundance_nonzero[i]),
-                       method=method_optim)
+    par = _optim(lambda p: fun(p, y_nonzero[i], design, offset_nonzero[i],
+                               abundance_nonzero[i]), par0, method_optim)
 
     # Compute dispersion for all genes using fitted parameters
-    dispersion = np.exp(result.x[0] + result.x[1] * abundance_full) + np.exp(result.x[2])
+    dispersion = np.exp(par[0] + par[1] * abundance_full) + np.exp(par[2])
 
     return {'dispersion': dispersion, 'AveLogCPM': abundance_full}
+
+
+def _approx_rule2(x, y, xout):
+    """R's approxfun(x, y, rule = 2, ties = mean)(xout)."""
+    xu, inv = np.unique(np.asarray(x, dtype=np.float64), return_inverse=True)
+    yu = np.bincount(inv, weights=np.asarray(y, dtype=np.float64)) / np.bincount(inv)
+    return np.interp(xout, xu, yu)
+
+
+def _trend_from_bins(bin_a, bin_d, x, method, df=5, span=0.3):
+    """Dispersion trend over x from binned estimates, as edgeR's binned
+    trends compute it: sqrt(dispersion) is fitted by a natural spline (as
+    ns(bin.A, knots, intercept = TRUE) with lm.fit, extended linearly
+    beyond the bins as predict() does) or by loessFit, then squared.
+    """
+    root = np.sqrt(bin_d)
+    if method == 'spline':
+        p1 = np.arange(1, df) / df
+        r = np.array([np.min(bin_a), np.max(bin_a)])
+        knots = 0.3 * np.quantile(bin_a, p1) + 0.7 * (r[0] + p1 * (r[1] - r[0]))
+        beta = np.linalg.lstsq(_ns_basis_with_knots(bin_a, knots, boundary_knots=r), root,
+                               rcond=None)[0]
+        return (_ns_basis_with_knots(x, knots, boundary_knots=r) @ beta) ** 2
+    from .limma_port import _loess_fit
+    fitted = _loess_fit(root, bin_a, span=span, iterations=1)
+    return _approx_rule2(bin_a, fitted, x) ** 2
 
 
 def disp_bin_trend(y, design=None, offset=None, df=5, span=0.3,
@@ -811,149 +882,112 @@ def disp_bin_trend(y, design=None, offset=None, df=5, span=0.3,
             bin_d[i - 1] = 0.1
         bin_a[i - 1] = np.mean(bin_ave)
 
-    # If few bins, use linear interpolation with R's approxfun(rule=2, ties=mean)
-    # behavior: average duplicate x values and clamp to boundary values outside range.
+    # Few bins: interpolate sqrt(dispersion) linearly, held constant beyond
     if nbins < 7:
-        x = np.asarray(bin_a, dtype=np.float64)
-        yv = np.sqrt(np.maximum(np.asarray(bin_d, dtype=np.float64), 0))
-        order = np.argsort(x)
-        x = x[order]
-        yv = yv[order]
-        # ties=mean
-        xu, inv = np.unique(x, return_inverse=True)
-        yu = np.zeros_like(xu, dtype=np.float64)
-        cnt = np.zeros_like(xu, dtype=np.float64)
-        for i, idx in enumerate(inv):
-            yu[idx] += yv[i]
-            cnt[idx] += 1.0
-        yu = yu / np.maximum(cnt, 1.0)
-        y_interp = np.interp(ave_log_cpm_vals, xu, yu, left=yu[0], right=yu[-1])
-        dispersion = np.maximum(y_interp ** 2, 0)
-        return {'AveLogCPM': ave_log_cpm_vals, 'dispersion': dispersion,
-                'bin.AveLogCPM': bin_a, 'bin.dispersion': bin_d}
-
-    # Natural spline + OLS matching R's dispBinTrend:
-    # ns(bin.A, df=df, knots=0.3*quantile+0.7*equispaced, intercept=TRUE)
-    # then lm.fit(basisbins, sqrt(bin.d))
-    p1 = np.arange(1, df) / df
-    knots1 = np.quantile(bin_a, p1)
-    r = np.array([np.min(bin_a), np.max(bin_a)])
-    knots2 = r[0] + p1 * (r[1] - r[0])
-    knots = 0.3 * knots1 + 0.7 * knots2
-
-    try:
-        basisbins = _ns_basis_with_knots(bin_a, knots, boundary_knots=r)
-        beta = np.linalg.lstsq(basisbins, np.sqrt(np.maximum(bin_d, 0)),
-                                rcond=None)[0]
-        basisall = _ns_basis_with_knots(ave_log_cpm_vals, knots,
-                                         boundary_knots=r)
-        dispersion = np.maximum((basisall @ beta) ** 2, 0)
-    except Exception:
-        dispersion = np.full(ntags, np.mean(bin_d))
-
+        dispersion = _approx_rule2(bin_a, np.sqrt(bin_d), ave_log_cpm_vals) ** 2
+    else:
+        dispersion = _trend_from_bins(bin_a, bin_d, ave_log_cpm_vals, method_trend,
+                                      df=df, span=span)
     return {'AveLogCPM': ave_log_cpm_vals, 'dispersion': dispersion,
             'bin.AveLogCPM': bin_a, 'bin.dispersion': bin_d}
 
 
-def disp_pearson(y, design=None, offset=None, subset=10000,
-                 ave_log_cpm_vals=None):
-    """Pearson estimator of common dispersion.
+def _filter_and_subset(y, offset, ave_log_cpm_vals, min_row_sum, subset):
+    """Drop rows with small sums, then take edgeR's systematic subset.
 
-    Port of edgeR's dispPearson.
+    As in dispPearson; AveLogCPM is filtered with the counts. (edgeR's
+    dispDeviance subsets with the unfiltered AveLogCPM, a bug.)
     """
-    y = np.asarray(y, dtype=np.float64)
-    if y.ndim == 1:
-        y = y.reshape(1, -1)
-
-    if design is None:
-        design = np.ones((y.shape[1], 1))
-    design = np.asarray(design, dtype=np.float64)
-
-    if offset is None:
-        offset = np.log(y.sum(axis=0))
-    offset = expand_as_matrix(np.asarray(offset, dtype=np.float64), y.shape)
-
-    ntags, nlibs = y.shape
-    ncoefs = design.shape[1]
-    df_res = nlibs - ncoefs
-
-    if df_res <= 0:
-        warnings.warn("No residual df: setting dispersion to NA")
-        return np.nan
-
-    # Subsetting
-    if subset is not None and subset < ntags:
+    keep = y.sum(axis=1) >= min_row_sum
+    y, offset = y[keep], offset[keep]
+    if ave_log_cpm_vals is not None:
+        ave_log_cpm_vals = np.asarray(ave_log_cpm_vals)[keep]
+    if y.shape[0] < 1:
+        raise ValueError("no data rows with required number of counts")
+    if subset is not None and subset <= y.shape[0] / 2:
         if ave_log_cpm_vals is None:
             ave_log_cpm_vals = ave_log_cpm(y, offset=offset)
         i = systematic_subset(subset, ave_log_cpm_vals)
-        y = y[i]
-        offset = offset[i]
-        ntags = y.shape[0]
-
-    def pearson_disp(d):
-        from .glm_fit import glm_fit
-        fit = glm_fit(y, design=design, dispersion=d, offset=offset, prior_count=0)
-        mu = fit['fitted.values']
-        # Pearson chi-squared
-        pearson = np.sum((y - mu) ** 2 / (mu + d * mu ** 2))
-        return (pearson / (ntags * df_res) - 1)
-
-    # Bisection search
-    try:
-        from scipy.optimize import brentq
-        result = brentq(pearson_disp, 0.001, 10.0, xtol=1e-5)
-    except Exception:
-        result = 0.1
-
-    return max(result, 0)
+        y, offset = y[i], offset[i]
+    return y, offset
 
 
-def disp_deviance(y, design=None, offset=None, subset=10000,
-                  ave_log_cpm_vals=None):
-    """Deviance estimator of common dispersion.
+def disp_pearson(y, design=None, offset=None, subset=10000, ave_log_cpm_vals=None,
+                 min_row_sum=5, tol=1e-6, initial_dispersion=0.1):
+    """Pearson estimator of the common dispersion.
 
-    Port of edgeR's dispDeviance.
+    Port of edgeR's dispPearson: fit at initial_dispersion, then solve
+    mean((y - mu)^2 / (mu (1 + phi mu))) = df.residual / nlibs over the
+    cells with mu > 0 by Newton's method from phi = 0.
     """
+    from .glm_fit import glm_fit
     y = np.asarray(y, dtype=np.float64)
     if y.ndim == 1:
         y = y.reshape(1, -1)
+    design = np.ones((y.shape[1], 1)) if design is None else np.asarray(design, dtype=np.float64)
+    offset = expand_as_matrix(np.asarray(0.0 if offset is None else offset, dtype=np.float64), y.shape)
+    y, offset = _filter_and_subset(y, offset, ave_log_cpm_vals, min_row_sum, subset)
 
-    if design is None:
-        design = np.ones((y.shape[1], 1))
-    design = np.asarray(design, dtype=np.float64)
+    mu = glm_fit(y, design=design, dispersion=initial_dispersion, offset=offset,
+                 prior_count=0)['fitted.values']
+    one = (y.shape[1] - design.shape[1]) / y.shape[1]
+    pos = mu > 0
+    y, mu = y.T[pos.T], mu.T[pos.T]
+    s2 = (y - mu) ** 2
+    phi = 0.0
+    for it in range(1, 102):
+        Q = np.mean(s2 / mu / (1 + phi * mu))
+        dQ = np.mean(s2 / (1 + phi * mu) ** 2)
+        dif = (Q - one) / dQ
+        if dif < 0:
+            break
+        phi += dif
+        if dif < tol:
+            break
+        if it > 100:
+            warnings.warn("iteration limit reached")
+            break
+    return phi
 
-    if offset is None:
-        offset = np.log(y.sum(axis=0))
-    offset = expand_as_matrix(np.asarray(offset, dtype=np.float64), y.shape)
 
-    ntags, nlibs = y.shape
-    ncoefs = design.shape[1]
-    df_res = nlibs - ncoefs
+def disp_deviance(y, design=None, offset=None, subset=10000, ave_log_cpm_vals=None,
+                  interval=(0, 4), tol=1e-5, min_row_sum=5, robust=False):
+    """Deviance estimator of the common dispersion.
 
-    if df_res <= 0:
-        warnings.warn("No residual df: setting dispersion to NA")
-        return np.nan
+    Port of edgeR's dispDeviance: the dispersion at which the mean (or with
+    robust, a quantile) of the genewise deviances equals the residual df,
+    found by R's uniroot() over dispersion^0.25. As in edgeR, the bounds are
+    first checked at par = interval[0] and interval[1], i.e. at dispersions
+    interval^4.
+    """
+    from .glm_fit import glm_fit
+    from .utils import uniroot_brent
+    y = np.asarray(y, dtype=np.float64)
+    if y.ndim == 1:
+        y = y.reshape(1, -1)
+    design = np.ones((y.shape[1], 1)) if design is None else np.asarray(design, dtype=np.float64)
+    offset = expand_as_matrix(np.asarray(0.0 if offset is None else offset, dtype=np.float64), y.shape)
+    if min(interval) < 0:
+        raise ValueError("please give a non-negative interval for the dispersion")
+    y, offset = _filter_and_subset(y, offset, ave_log_cpm_vals, min_row_sum, subset)
 
-    # Subsetting
-    if subset is not None and subset < ntags:
-        if ave_log_cpm_vals is None:
-            ave_log_cpm_vals = ave_log_cpm(y, offset=offset)
-        i = systematic_subset(subset, ave_log_cpm_vals)
-        y = y[i]
-        offset = offset[i]
-        ntags = y.shape[0]
+    df = y.shape[1] - design.shape[1]
+    if robust:
+        from scipy.stats import chi2 as chi2_dist
+        p = chi2_dist.cdf(df, df)
+        bias = lambda dev: np.quantile(dev, p) - df
+    else:
+        bias = lambda dev: np.mean(dev) - df
 
-    def dev_disp(d):
-        from .glm_fit import glm_fit
-        from .glm_levenberg import nbinom_deviance
-        fit = glm_fit(y, design=design, dispersion=d, offset=offset, prior_count=0)
-        dev = nbinom_deviance(y, fit['fitted.values'], d)
-        return np.sum(dev) / (ntags * df_res) - 1
+    def fun(par):
+        dev = glm_fit(y, design=design, dispersion=par ** 4, offset=offset,
+                      prior_count=0)['deviance']
+        return bias(dev)
 
-    try:
-        from scipy.optimize import brentq
-        result = brentq(dev_disp, 0.001, 10.0, xtol=1e-5)
-    except Exception:
-        result = 0.1
-
-    return max(result, 0)
+    if fun(interval[0]) <= 0:
+        return interval[0]
+    if fun(interval[1]) > 0:
+        warnings.warn("dispersion estimate above interval upper limit")
+        return interval[1]
+    root = uniroot_brent(fun, interval[0] ** 0.25, interval[1] ** 0.25, tol=tol)
+    return root ** 4

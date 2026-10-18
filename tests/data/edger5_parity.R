@@ -183,6 +183,37 @@ inputs$genewise_offset <- matrix(log(dge0$samples$lib.size * dge0$samples$norm.f
 out$disp_genewise_offset <- disp_values(estimateDisp(counts, design = model.matrix(~group),
                                                      group = group, offset = inputs$genewise_offset))
 
+# The older dispersion estimators, each from an unmodified DGEList
+dgen <- normLibSizes(DGEList(counts, group = group))
+for (d in c("oneway", "additive")) {
+  X <- inputs[[d]]
+  for (m in c("CoxReid", "Pearson", "deviance"))
+    out[[paste0("glmcommon_", m, "_", d)]] <- estimateGLMCommonDisp(dgen, X, method = m)$common.dispersion
+  for (m in c("bin.spline", "bin.loess", "power", "spline"))
+    out[[paste0("glmtrended_", m, "_", d)]] <- estimateGLMTrendedDisp(dgen, X, method = m)$trended.dispersion
+  chain <- estimateGLMTrendedDisp(estimateGLMCommonDisp(dgen, X), X)
+  out[[paste0("glmtagwise_", d)]] <- estimateGLMTagwiseDisp(chain, X)$tagwise.dispersion
+  out[[paste0("glmtagwise_notrend_", d)]] <- estimateGLMTagwiseDisp(estimateGLMCommonDisp(dgen, X), X,
+                                                                    trend = FALSE)$tagwise.dispersion
+  out[[paste0("glmrobust_", d)]] <- estimateGLMRobustDisp(dgen, X)$tagwise.dispersion
+}
+classic <- estimateCommonDisp(dgen)
+out$classic_tagwise <- estimateTagwiseDisp(classic)$tagwise.dispersion
+out$classic_tagwise_loess <- estimateTagwiseDisp(classic, trend = "loess", span = 0.8,
+                                                 prior.df = 20)$tagwise.dispersion
+out$classic_tagwise_none <- estimateTagwiseDisp(classic, trend = "none")$tagwise.dispersion
+# Binned trends on 2000 genes: enough for 7 or more bins in dispBinTrend
+# and for estimateTrendedDisp's 50 bins
+set.seed(5)
+mu_big <- outer(rgamma(2000, 0.8, 0.02), rep(1, nlibs))
+inputs$big_counts <- matrix(rnbinom(2000 * nlibs, mu = mu_big, size = 8), 2000, nlibs)
+storage.mode(inputs$big_counts) <- "double"
+dgebig <- normLibSizes(DGEList(inputs$big_counts, group = group))
+for (m in c("bin.spline", "bin.loess")) {
+  out[[paste0("bigtrended_", m)]] <- estimateGLMTrendedDisp(dgebig, inputs$additive, method = m)$trended.dispersion
+  out[[paste0("classic_trended_", m)]] <- estimateTrendedDisp(estimateCommonDisp(dgebig), method = m)$trended.dispersion
+}
+
 # Unequal-df squeezeVar on enough genes that the loess span is below 1
 set.seed(7)
 inputs$sv2_var <- rchisq(2000, 4) / 4 * exp(rnorm(2000, 0, 0.3))

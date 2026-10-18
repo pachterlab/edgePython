@@ -363,3 +363,85 @@ def test_locfit_degree1_matches_locfit_tree_evaluation():
     fitted = locfit_by_col(_as_array(INPUTS["loc1_y"]), _as_array(INPUTS["loc1_x"]),
                            weights=_as_array(INPUTS["loc1_w"]), span=0.3, degree=1)
     np.testing.assert_allclose(fitted, _edger("locfit_degree1"), rtol=1e-11, atol=1e-11)
+
+
+# Tolerances for the older estimators. Cox-Reid dispersions on designs that
+# need the Levenberg fit agree to R's Brent tolerance (1e-5 on
+# dispersion^0.25), as their APL sums differ at 1e-9 through the rounding of
+# the fits' QR start values. In the one-way bin with the lowest counts the
+# Cox-Reid dispersion is about 1e-7, where the APL is flat and R's own value
+# is set by rounding in lgamma(y + 1/dispersion).
+OLD_ESTIMATOR_TOL = {
+    "oneway": {"exact": (1e-9, 0), "coxreid": (1e-3, 5e-4)},
+    "additive": {"exact": (1e-9, 0), "coxreid": (1e-3, 1e-5)},
+}
+
+
+@pytest.mark.parametrize("design", ["oneway", "additive"])
+def test_glm_common_disp_methods_match_edger(design):
+    X = _as_array(INPUTS[design])
+    for method in ["Pearson", "deviance"]:
+        d = ep.estimate_glm_common_disp(_fresh_dgelist(), X, method=method)["common.dispersion"]
+        assert d == pytest.approx(_edger(f"glmcommon_{method}_{design}")[0], rel=1e-12)
+    d = ep.estimate_glm_common_disp(_fresh_dgelist(), X)["common.dispersion"]
+    rtol = 1e-9 if design == "oneway" else 1e-4
+    assert d == pytest.approx(_edger(f"glmcommon_CoxReid_{design}")[0], rel=rtol)
+
+
+@pytest.mark.parametrize("design", ["oneway", "additive"])
+@pytest.mark.parametrize("method", ["bin.spline", "bin.loess", "power", "spline"])
+def test_glm_trended_disp_matches_edger(design, method):
+    # power and spline use R's Nelder-Mead and R's ns() basis
+    y = ep.estimate_glm_trended_disp(_fresh_dgelist(), _as_array(INPUTS[design]), method=method)
+    kind = "coxreid" if method.startswith("bin") else "exact"
+    rtol, atol = OLD_ESTIMATOR_TOL[design][kind]
+    _assert_close(y["trended.dispersion"], _edger(f"glmtrended_{method}_{design}"), rtol=rtol, atol=atol)
+
+
+@pytest.mark.parametrize("method", ["bin.spline", "bin.loess"])
+def test_binned_trends_with_many_bins_match_edger(method):
+    big = _as_array(INPUTS["big_counts"])
+    fresh = lambda: ep.calc_norm_factors(ep.make_dgelist(big, group=np.repeat(["A", "B", "C"], 3)))
+    # dispBinTrend with 20 bins fits the spline or loess trend
+    y = ep.estimate_glm_trended_disp(fresh(), _as_array(INPUTS["additive"]), method=method)
+    _assert_close(y["trended.dispersion"], _edger(f"bigtrended_{method}"), rtol=1e-3)
+    # The classic estimateTrendedDisp, with 50 bins of estimateCommonDisp
+    y = ep.estimate_trended_disp(ep.estimate_common_disp(fresh()), method=method)
+    _assert_close(y["trended.dispersion"], _edger(f"classic_trended_{method}"), rtol=1e-8)
+
+
+@pytest.mark.parametrize("design", ["oneway", "additive"])
+def test_glm_tagwise_and_robust_disp_match_edger(design):
+    X = _as_array(INPUTS[design])
+    rtol, atol = OLD_ESTIMATOR_TOL[design]["coxreid"]
+    y = ep.estimate_glm_trended_disp(ep.estimate_glm_common_disp(_fresh_dgelist(), X), X)
+    trended = y["trended.dispersion"].copy()
+    y = ep.estimate_glm_tagwise_disp(y, X)
+    # The trended dispersions must not be overwritten
+    np.testing.assert_array_equal(y["trended.dispersion"], trended)
+    _assert_close(y["tagwise.dispersion"], _edger(f"glmtagwise_{design}"), rtol=rtol, atol=atol)
+    y = ep.estimate_glm_tagwise_disp(ep.estimate_glm_common_disp(_fresh_dgelist(), X), X, trend=False)
+    notrend_rtol = 1e-9 if design == "oneway" else 1e-4
+    _assert_close(y["tagwise.dispersion"], _edger(f"glmtagwise_notrend_{design}"), rtol=notrend_rtol)
+    y = ep.estimate_glm_robust_disp(_fresh_dgelist(), X)
+    _assert_close(y["tagwise.dispersion"], _edger(f"glmrobust_{design}"), rtol=rtol, atol=atol)
+
+
+@pytest.mark.parametrize("case, kwargs", [
+    ("classic_tagwise", {}),
+    ("classic_tagwise_loess", {"trend": "loess", "span": 0.8, "prior_df": 20}),
+    ("classic_tagwise_none", {"trend": "none"}),
+])
+def test_classic_tagwise_disp_matches_edger(case, kwargs):
+    y = ep.estimate_tagwise_disp(ep.estimate_common_disp(_fresh_dgelist()), **kwargs)
+    _assert_close(y["tagwise.dispersion"], _edger(case), rtol=1e-6)
+
+
+def test_r_optimizers_reproduce_r():
+    # Nelder-Mead and uniroot, as optim() and uniroot() give them in R
+    from edgepython.utils import optim_nelder_mead, uniroot_brent
+    par, value = optim_nelder_mead(lambda x: 100 * (x[1] - x[0] ** 2) ** 2 + (1 - x[0]) ** 2,
+                                   [-1.2, 1])
+    np.testing.assert_allclose(par, [1.0002601387256695, 1.000505999303765], rtol=1e-15)
+    assert value == pytest.approx(8.8252410967227472e-08, rel=1e-13)
+    assert uniroot_brent(lambda x: x ** 3 - 2 * x - 5, 2, 3, tol=1e-5) == 2.0945512665841388
