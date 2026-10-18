@@ -8,7 +8,7 @@ Empirical analysis of digital gene expression data in Python.
 __version__ = "0.2.6"
 
 # --- Classes ---
-from .classes import DGEList, DGEExact, DGEGLM, DGELRT, TopTags
+from .classes import DGEList, DGEExact, DGEGLM, DGELRT, TopTags, PCList, DGEBIN
 from .classes import cbind_dgelist, rbind_dgelist
 from .compressed_matrix import CompressedMatrix
 
@@ -75,6 +75,16 @@ from .io import (
     seurat_to_pb,
     dgelist_from_tximport,
     dgelist_from_tximeta,
+)
+from .binomial import (
+    make_pclist,
+    read_bismark2pc,
+    rowsum_pclist,
+    bin_fit,
+    bin_ql_fit,
+    bin_ql_ftest,
+    mbin_one_way,
+    mbin_iwls,
 )
 from .quant_readers import (
     catch_salmon,

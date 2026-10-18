@@ -86,6 +86,10 @@ Competitive and self-contained gene set tests: `camera`, `fry`, `roast`, `mroast
 
 Differential exon and transcript usage testing via `diff_splice` (GLM-based with LRT or QL tests), `diff_splice_dge` (exact test for two-group comparisons), and `splice_variants` (chi-squared tests for homogeneity of proportions across exons).
 
+### Paired Counts and Binomial Models
+
+Differential proportion analysis of paired counts, such as methylated and unmethylated reads, following edgeR 5.0: `make_pclist` and `read_bismark2pc` build a PCList; `bin_fit` fits binomial GLMs; `bin_ql_fit` and `bin_ql_ftest` give quasi-binomial F-tests with bias-adjusted deviances, empirical Bayes quasi-dispersions and TREAT/UPSHOT odds-ratio thresholds; `sample_weights` estimates sample quality weights from binomial or negative binomial QL fits.
+
 ### Quantification Uncertainty
 
 Reading quantification output with bootstrap or Gibbs sampling uncertainty from Salmon (`catch_salmon`), kallisto (`catch_kallisto`), lr-kallisto (`catch_lr_kallisto`), oarfish (`catch_oarfish`) and RSEM (`catch_rsem`), each with a gene-level version (`catch_salmon_gene`, `catch_kallisto_gene`, `catch_lr_kallisto_gene`, `catch_oarfish_gene`, `catch_rsem_gene`). Overdispersion estimates from quantification uncertainty are used for differential transcript expression following the approach of Baldoni et al. (2024). Gencode transcript names are unpacked into annotation (`split_gencode_tx_names`, `collapse_gencode_tx2gene`). `dgelist_from_tximport` and `dgelist_from_tximeta` build a DGEList from tximport or tximeta output.

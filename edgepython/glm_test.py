@@ -286,7 +286,6 @@ def _ql_ftest(counts, offset, dispersion, weights, design, test_coef, deviance,
     """
     from .glm_fit import glm_fit
     shape = counts.shape
-    ncoef = len(test_coef)
     keep = [j for j in range(design.shape[1]) if j not in test_coef]
     design0 = design[:, keep]
     design1 = design[:, test_coef]
@@ -298,11 +297,26 @@ def _ql_ftest(counts, offset, dispersion, weights, design, test_coef, deviance,
         return glm_fit(counts[rows], design=design0, dispersion=disp[rows], offset=off,
                        weights=None if w is None else w[rows], prior_count=0)['deviance']
 
+    return _ftest_engine(null_deviance, offset, design1, deviance, s2_post, df_total, lfc,
+                         logFCt, upshot)
+
+
+def _ftest_engine(null_deviance, offset, design1, deviance, s2_post, df_total, lfc,
+                  logFCt, upshot):
+    """edgeR 5.0's ftest_engine, shared by the NB and binomial QL F-tests.
+
+    null_deviance(rows, off) refits the null model for those genes with
+    offsets off (None for the base fit when there is no base offset).
+    offset is the base offset matrix, or None (binomial).
+    """
+    ngenes = deviance.shape[0]
+    ncoef = design1.shape[1]
+
     def ftest(dev0, rows):
         F = np.maximum(dev0 - deviance[rows], 0) / ncoef / s2_post[rows]
         return F, f_dist.sf(F, ncoef, df_total[rows])
 
-    all_rows = np.arange(shape[0])
+    all_rows = np.arange(ngenes)
     F_stat, p_base = ftest(null_deviance(all_rows, offset), all_rows)
     if not np.any(lfc > 0):
         return F_stat, p_base
@@ -311,7 +325,7 @@ def _ql_ftest(counts, offset, dispersion, weights, design, test_coef, deviance,
     pvalue = _UPSHOT_CENTRE * p_base if upshot else None
     abs_lfc = np.abs(logFCt) * np.log(2)
     for i, s in enumerate(nodes):
-        node_p = np.ones(shape[0])
+        node_p = np.ones(ngenes)
         thr = lfc * s * np.log(2)
         rows = np.flatnonzero(np.any(abs_lfc > thr, axis=1))
         if rows.size:
@@ -319,7 +333,9 @@ def _ql_ftest(counts, offset, dispersion, weights, design, test_coef, deviance,
             min_dev = np.full(rows.size, np.inf)
             for b in range(2 ** ncoef):
                 sign = np.array([2.0 * ((b >> c) & 1) - 1.0 for c in range(ncoef)])
-                off = offset[rows] + (pinned * sign) @ design1.T
+                off = (pinned * sign) @ design1.T
+                if offset is not None:
+                    off = offset[rows] + off
                 min_dev = np.minimum(min_dev, null_deviance(rows, off))
             node_p[rows] = ftest(min_dev, rows)[1]
         if upshot:

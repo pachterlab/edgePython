@@ -39,6 +39,22 @@ def plot_md(obj, column=None, coef=None, xlab='Average log CPM',
         tab = obj['table']
         x = tab['logCPM'].values if 'logCPM' in tab.columns else tab.get('logCPM', np.zeros(len(tab)))
         y = tab['logFC'].values if 'logFC' in tab.columns else tab.iloc[:, 0].values
+        if 'logFC' not in tab.columns and 'logOR' in tab.columns and ylab == 'log-fold-change':
+            ylab = 'log-odds-ratio'
+    elif isinstance(obj, dict) and 'coefficients' in obj and 'counts2' in obj:
+        # DGEBIN (plotMD.DGEBIN): log-odds ratios, hiding zero-weight points
+        x = obj.get('AveLogCPM')
+        if x is None:
+            raise ValueError("AveLogCPM component is absent.")
+        coefs = np.asarray(obj['coefficients'], dtype=np.float64)
+        if column is None:
+            column = coefs.shape[1] - 1
+        y = coefs[:, column].copy()
+        if obj.get('weights') is not None and not kwargs.pop('zero_weights', False):
+            w = np.asarray(obj['weights'], dtype=np.float64)[:, column]
+            y[np.isnan(w) | (w <= 0)] = np.nan
+        if ylab == 'log-fold-change':
+            ylab = 'log-odds-ratio'
     elif isinstance(obj, dict) and 'coefficients' in obj:
         from .expression import ave_log_cpm
         x = obj.get('AveLogCPM')
@@ -149,16 +165,27 @@ def plot_mds(y, top=500, labels=None, pch=None, cex=1, dim_plot=(1, 2),
     import matplotlib.pyplot as plt
     from .expression import cpm
 
-    if isinstance(y, dict) and 'counts' in y:
-        counts = y['counts']
+    axis_label = 'Dimension'
+    if isinstance(y, dict) and 'counts2' in y:
+        # PCList (plotMDS.PCList): M-values, log2 odds of counts to counts2
+        prior_count = kwargs.pop('prior_count', 2)
         if labels is None:
-            labels = y['samples'].index.tolist() if hasattr(y['samples'], 'index') else None
+            labels = y['samples'].index.tolist()
+        counts = np.asarray(y['counts'], dtype=np.float64)
+        log_cpm = (np.log2(counts + prior_count)
+                   - np.log2(np.asarray(y['counts2'], dtype=np.float64) + prior_count))
+        axis_label = 'Leading logOR dim'
     else:
-        counts = np.asarray(y, dtype=np.float64)
+        if isinstance(y, dict) and 'counts' in y:
+            counts = y['counts']
+            if labels is None:
+                labels = y['samples'].index.tolist() if hasattr(y['samples'], 'index') else None
+        else:
+            counts = np.asarray(y, dtype=np.float64)
 
-    # Log-CPM values
-    lib_size = counts.sum(axis=0)
-    log_cpm = np.log2(counts / lib_size[None, :] * 1e6 + 0.5)
+        # Log-CPM values
+        lib_size = counts.sum(axis=0)
+        log_cpm = np.log2(counts / lib_size[None, :] * 1e6 + 0.5)
 
     nsamples = counts.shape[1]
     if labels is None:
@@ -204,9 +231,9 @@ def plot_mds(y, top=500, labels=None, pch=None, cex=1, dim_plot=(1, 2),
                     textcoords="offset points", xytext=(5, 5), fontsize=8)
 
     if xlab is None:
-        xlab = f'Dimension {dim_plot[0]} ({var_exp1:.1f}%)'
+        xlab = f'{axis_label} {dim_plot[0]} ({var_exp1:.1f}%)'
     if ylab is None:
-        ylab = f'Dimension {dim_plot[1]} ({var_exp2:.1f}%)'
+        ylab = f'{axis_label} {dim_plot[1]} ({var_exp2:.1f}%)'
 
     ax.set_xlabel(xlab)
     ax.set_ylabel(ylab)

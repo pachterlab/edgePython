@@ -404,6 +404,92 @@ out$collapse_gencode <- list(ids = row.names(cg), GeneName = cg$GeneName, TxType
 out$catch_lr_kallisto <- catch_values(quiet(catchKallisto("quant/lr_kallisto/dirs")))
 out$catch_lr_kallisto_gene <- catch_values(quiet(catchKallistoGene("quant/lr_kallisto/dirs")))
 
+# Binomial GLMs for paired counts (PCList): binFit, binQLFit, binQLFTest,
+# sampleWeights, mbinOneWay, mbinIWLS, aveLogCPM and rowsum. Loci with no
+# coverage, with proportions of 0 or 1, and with small coverage (where the
+# QL weights are exact sums rather than the Poisson approximation).
+set.seed(30)
+nloc <- 400
+bgroup <- factor(rep(c("A", "B"), each = 3))
+bbatch <- factor(rep(1:3, 2))
+lp <- qlogis(rbeta(nloc, 1.2, 1.8))
+lp <- outer(lp, rep(1, 6)) + outer(c(rnorm(100, 0, 1), rep(0, nloc - 100)), as.numeric(bgroup == "B")) +
+  outer(rep(1, nloc), c(0, 0.2, -0.2)[bbatch]) + matrix(rnorm(nloc * 6, 0, 0.3), nloc, 6)
+coverage <- matrix(rnbinom(nloc * 6, mu = rep(rgamma(nloc, 1.5, 0.06), 6), size = 3), nloc, 6)
+coverage[31:60, ] <- rpois(30 * 6, 2)
+coverage[21:25, ] <- 0
+coverage[26:28, 1] <- 0
+inputs$meth <- matrix(rbinom(nloc * 6, coverage, plogis(lp)), nloc, 6)
+inputs$meth[1:5, ] <- 0
+inputs$meth[6:10, ] <- coverage[6:10, ]
+inputs$unmeth <- coverage - inputs$meth
+storage.mode(inputs$meth) <- storage.mode(inputs$unmeth) <- "double"
+inputs$bin_oneway <- unname(model.matrix(~bgroup))
+inputs$bin_additive <- unname(model.matrix(~bbatch + bgroup))
+# Weights and offsets from formulas, rebuilt in the tests rather than stored
+bin_weights <- matrix(0.5 + ((seq_len(nloc * 6) * 7919) %% 1000) / 1000, nloc, 6)
+bin_offset <- matrix(((seq_len(nloc * 6) * 104729) %% 2000) / 5000 - 0.2, nloc, 6)
+pc <- PCList(inputs$meth, inputs$unmeth, group = bgroup)
+out$pclist_avelogcpm <- aveLogCPM(pc)
+bin_values <- function(f, fitted = FALSE) list(coefficients = unname(f$coefficients),
+  fitted = if (fitted) unname(f$fitted.values) else NULL, deviance = f$deviance, unshrunk = if (is.null(f$unshrunk.coefficients)) NULL else unname(f$unshrunk.coefficients))
+out$binfit_oneway <- bin_values(binFit(pc))
+out$binfit_additive <- bin_values(binFit(pc, design = inputs$bin_additive))
+out$binfit_weights <- bin_values(binFit(inputs$meth, inputs$unmeth, design = inputs$bin_additive,
+                                        weights = bin_weights), fitted = TRUE)
+out$binfit_offset <- bin_values(binFit(inputs$meth, inputs$unmeth, design = inputs$bin_oneway,
+                                       offset = bin_offset, prior.count = 0))
+# The QL fits' coefficients are binFit's, and AveLogCPM is aveLogCPM(pc)
+binql_values <- function(f) list(df_adj = f$df.residual.adj, dev_adj = f$deviance.adj,
+  s2_post = f$s2.post, s2_prior = f$s2.prior, df_prior = f$df.prior,
+  average_ql = f$average.ql.dispersion)
+qo <- binQLFit(pc)
+qa <- binQLFit(pc, design = inputs$bin_additive)
+qw <- binQLFit(inputs$meth, inputs$unmeth, design = inputs$bin_additive, weights = bin_weights)
+out$binqlfit_oneway <- binql_values(qo)
+out$binqlfit_additive <- binql_values(qa)
+out$binqlfit_weights <- binql_values(qw)
+out$binqlfit_plain <- binql_values(binQLFit(pc, design = inputs$bin_additive, robust = FALSE,
+                                            abundance.trend = FALSE))
+# logOR is the coefficients / log(2), so only F and PValue are kept
+bt <- function(r) as.list(r$table[, c("F", "PValue")])
+out$binqlftest_oneway <- bt(binQLFTest(qo))
+out$binqlftest_coef <- bt(binQLFTest(qa, coef = 2))
+out$binqlftest_multi <- bt(binQLFTest(qa, coef = 2:4))
+out$binqlftest_contrast <- bt(binQLFTest(qa, contrast = c(0, 1, -1, 0)))
+out$binqlftest_upshot <- bt(binQLFTest(qa, lor = 0.5))
+out$binqlftest_treat <- bt(binQLFTest(qa, lor = 0.5, upshot = FALSE))
+out$binqlftest_multi_lor <- bt(binQLFTest(qa, coef = 2:3, lor = c(0.3, 0.6)))
+out$binqlftest_weights <- bt(binQLFTest(qw, lor = 0.4))
+out$bin_sample_weights <- sampleWeights(qa)[1, ]
+out$bin_sample_weights_obs <- sampleWeights(qw)[1, ]
+out$mbin_oneway <- mbinOneWay(inputs$meth, inputs$unmeth, design = inputs$bin_oneway)[c("coefficients", "deviance")]
+out$mbin_oneway_group <- unname(mbinOneWay(inputs$meth, inputs$unmeth, group = bgroup)$coefficients)
+out$mbin_iwls <- mbinIWLS(inputs$meth, inputs$unmeth, inputs$bin_additive)[c("coefficients", "deviance", "iter")]
+out$mbin_iwls$coefficients <- unname(out$mbin_iwls$coefficients)
+out$mbin_oneway$coefficients <- unname(out$mbin_oneway$coefficients)
+rs <- rowsum(pc, rep(1:100, each = 4))
+out$pclist_rowsum <- list(counts = unname(rs$counts), counts2 = unname(rs$counts2))
+# readBismark2PC on three coverage files (one gzipped) in bismark/
+dir.create("bismark", showWarnings = FALSE)
+set.seed(31)
+for (k in 1:3) {
+  chr <- rep(c("chr1", "chr2", "chrX"), c(15, 10, 5))
+  pos <- c(sort(sample(1e4, 15)), sort(sample(1e4, 10)), sort(sample(1e4, 5)))
+  keep <- sort(sample(30, 24))
+  m <- rpois(30, 6); u <- rpois(30, 4)
+  d <- data.frame(chr, pos, pos, round(100 * m / pmax(m + u, 1), 2), m, u)[keep, ]
+  f <- file.path("bismark", paste0("sample", k, ".cov"))
+  if (k == 3) f <- gzfile(paste0(f, ".gz"), "w")
+  write.table(d, f, sep = "\t", quote = FALSE, row.names = FALSE, col.names = FALSE)
+  if (k == 3) close(f)
+}
+bf <- c("bismark/sample1.cov", "bismark/sample2.cov", "bismark/sample3.cov.gz")
+bp <- quiet(readBismark2PC(bf))
+out$bismark2pc <- list(ids = row.names(bp), samples = colnames(bp), counts = unname(bp$counts),
+                       counts2 = unname(bp$counts2), Chr = as.character(bp$genes$Chr),
+                       Locus = bp$genes$Locus, chr_levels = levels(bp$genes$Chr))
+
 inputs$version <- c(R = as.character(getRversion()),
                     edgeR = as.character(packageVersion("edgeR")),
                     limma = as.character(packageVersion("limma")))

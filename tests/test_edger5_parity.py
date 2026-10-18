@@ -987,3 +987,169 @@ def test_catch_readers_old_calls_and_plain_lists():
     assert set(out) == {"counts", "effective.length", "annotation", "overdispersion.prior",
                         "resample.type", "divided.counts"}
     np.testing.assert_array_equal(out["counts"].to_numpy(), y["counts"])
+
+
+# Binomial GLMs for paired counts: PCList, binFit, binQLFit, binQLFTest
+
+METH = _as_array(INPUTS["meth"])
+UNMETH = _as_array(INPUTS["unmeth"])
+BIN_ONEWAY = _as_array(INPUTS["bin_oneway"])
+BIN_ADDITIVE = _as_array(INPUTS["bin_additive"])
+_k = np.arange(1, 400 * 6 + 1)
+BIN_WEIGHTS = (0.5 + (_k * 7919 % 1000) / 1000).reshape(6, 400).T
+BIN_OFFSET = ((_k * 104729 % 2000) / 5000 - 0.2).reshape(6, 400).T
+# Loci whose weighted design is rank deficient (no coverage in a batch or
+# group): edgeR returns their coefficients in LINPACK's pivoted column
+# order, while edgePython keeps the design's order (0 for the column set
+# aside), so their coefficients, and TREAT tests that use them, differ
+BIN_RANKDEF = np.array([(c > 0).sum() == 0 or np.linalg.matrix_rank(BIN_ADDITIVE[c > 0]) < 4
+                        for c in METH + UNMETH])
+
+
+def _pclist():
+    return ep.make_pclist(METH, UNMETH, group=np.repeat(["A", "B"], 3))
+
+
+@pytest.fixture(scope="module")
+def bin_fits():
+    return {"oneway": ep.bin_ql_fit(_pclist()),
+            "additive": ep.bin_ql_fit(_pclist(), design=BIN_ADDITIVE),
+            "weights": ep.bin_ql_fit(METH, UNMETH, design=BIN_ADDITIVE, weights=BIN_WEIGHTS)}
+
+
+def test_pclist_ave_log_cpm_and_rowsum_match_edger():
+    _assert_close(ep.ave_log_cpm(_pclist()), _edger("pclist_avelogcpm"), rtol=1e-13)
+    rs = ep.rowsum_pclist(_pclist(), np.repeat(np.arange(1, 101), 4))
+    np.testing.assert_array_equal(rs["counts"], _edger("pclist_rowsum", "counts"))
+    np.testing.assert_array_equal(rs["counts2"], _edger("pclist_rowsum", "counts2"))
+    assert list(rs["genes"].index) == [str(i) for i in range(1, 101)]
+
+
+@pytest.mark.parametrize("case, args, kwargs", [
+    ("binfit_oneway", "pclist", {}),
+    ("binfit_additive", "pclist", {"design": BIN_ADDITIVE}),
+    ("binfit_weights", "matrix", {"design": BIN_ADDITIVE, "weights": BIN_WEIGHTS}),
+    ("binfit_offset", "matrix", {"design": BIN_ONEWAY, "offset": BIN_OFFSET, "prior_count": 0}),
+])
+def test_bin_fit_matches_edger5(case, args, kwargs):
+    fit = ep.bin_fit(_pclist(), **kwargs) if args == "pclist" else ep.bin_fit(METH, UNMETH, **kwargs)
+    expected = EDGER[case]
+    _assert_close(fit["coefficients"], _as_array(expected["coefficients"]), rtol=1e-11, atol=1e-11)
+    _assert_close(fit["deviance"], _as_array(expected["deviance"]), rtol=1e-10, atol=1e-12)
+    if expected["fitted"] != {}:
+        _assert_close(fit["fitted.values"], _as_array(expected["fitted"]), rtol=1e-12, atol=1e-14)
+    if expected["unshrunk"] != {}:
+        full_rank = ~BIN_RANKDEF if fit["design"].shape[1] == 4 else slice(None)
+        _assert_close(fit["unshrunk.coefficients"][full_rank], _as_array(expected["unshrunk"])[full_rank],
+                      rtol=1e-8, atol=1e-8)
+
+
+@pytest.mark.parametrize("case", ["oneway", "additive", "weights", "plain"])
+def test_bin_ql_fit_matches_edger5(bin_fits, case):
+    fit = bin_fits.get(case) or ep.bin_ql_fit(_pclist(), design=BIN_ADDITIVE, robust=False,
+                                              abundance_trend=False)
+    expected = EDGER[f"binqlfit_{case}"]
+    for key, ours in [("df_adj", "df.residual.adj"), ("dev_adj", "deviance.adj"), ("s2_post", "s2.post"),
+                      ("s2_prior", "s2.prior"), ("df_prior", "df.prior"),
+                      ("average_ql", "average.ql.dispersion")]:
+        _assert_close(fit[ours], _as_array(expected[key]), rtol=1e-8, atol=1e-12)
+    if case != "weights":
+        _assert_close(fit["AveLogCPM"], _edger("pclist_avelogcpm"), rtol=1e-13)
+
+
+@pytest.mark.parametrize("case, fit, kwargs", [
+    ("binqlftest_oneway", "oneway", {}),
+    ("binqlftest_coef", "additive", {"coef": 1}),
+    ("binqlftest_multi", "additive", {"coef": [1, 2, 3]}),
+    ("binqlftest_contrast", "additive", {"contrast": np.array([0, 1, -1, 0])}),
+    ("binqlftest_upshot", "additive", {"lor": 0.5}),
+    ("binqlftest_treat", "additive", {"lor": 0.5, "upshot": False}),
+    ("binqlftest_multi_lor", "additive", {"coef": [1, 2], "lor": [0.3, 0.6]}),
+    ("binqlftest_weights", "weights", {"lor": 0.4}),
+])
+def test_bin_ql_ftest_matches_edger5(bin_fits, case, fit, kwargs):
+    tab = ep.bin_ql_ftest(bin_fits[fit], **kwargs)["table"]
+    rows = ~BIN_RANKDEF if "lor" in kwargs else slice(None)
+    for col in ("F", "PValue"):
+        _assert_close(tab[col].to_numpy()[rows], _edger(case, col)[rows], rtol=1e-6, atol=1e-12)
+    logor = [c for c in tab.columns if c.startswith("logOR")]
+    coefs = bin_fits[fit]["coefficients"] / np.log(2)
+    if "contrast" in kwargs:
+        np.testing.assert_allclose(tab["logOR"], coefs @ kwargs["contrast"], rtol=1e-13, atol=1e-14)
+    else:
+        coef = np.atleast_1d(kwargs.get("coef", coefs.shape[1] - 1))
+        np.testing.assert_allclose(tab[logor].to_numpy(), coefs[:, coef], rtol=1e-13)
+
+
+def test_bin_ql_ftest_treat_with_edgers_pivoted_coefficients(bin_fits):
+    # Given edgeR's (pivoted) unshrunk coefficients, the rank-deficient loci agree too
+    fit = ep.DGEBIN(bin_fits["additive"])
+    fit["unshrunk.coefficients"] = _edger("binfit_additive", "unshrunk")
+    tab = ep.bin_ql_ftest(fit, lor=0.5)["table"]
+    _assert_close(tab["PValue"], _edger("binqlftest_upshot", "PValue"), rtol=1e-6, atol=1e-12)
+
+
+def test_bin_sample_weights_match_edger5(bin_fits):
+    _assert_close(ep.sample_weights(bin_fits["additive"])[0], _edger("bin_sample_weights"), rtol=1e-12)
+    _assert_close(ep.sample_weights(bin_fits["weights"])[0], _edger("bin_sample_weights_obs"), rtol=1e-12)
+
+
+def test_mbin_one_way_and_iwls_match_edger():
+    r = ep.mbin_one_way(METH, UNMETH, design=BIN_ONEWAY)
+    _assert_close(r["coefficients"], _edger("mbin_oneway", "coefficients"), rtol=1e-12, atol=1e-12)
+    _assert_close(r["deviance"], _edger("mbin_oneway", "deviance"), rtol=1e-12, atol=1e-12)
+    _assert_close(ep.mbin_one_way(METH, UNMETH, group=np.repeat(["A", "B"], 3))["coefficients"],
+                  _edger("mbin_oneway_group"), rtol=1e-12, atol=1e-12)
+    r = ep.mbin_iwls(METH, UNMETH, BIN_ADDITIVE)
+    _assert_close(r["coefficients"][~BIN_RANKDEF], _edger("mbin_iwls", "coefficients")[~BIN_RANKDEF],
+                  rtol=1e-8, atol=1e-8)
+    _assert_close(r["deviance"], _edger("mbin_iwls", "deviance"), rtol=1e-10, atol=1e-12)
+    np.testing.assert_array_equal(r["iter"], _edger("mbin_iwls", "iter"))
+
+
+def test_read_bismark2pc_matches_edger():
+    import os
+    old = os.getcwd()
+    try:
+        # edgeR's sample names keep the paths given, so read from the same place
+        os.chdir(DATA)
+        y = ep.read_bismark2pc(["bismark/sample1.cov", "bismark/sample2.cov", "bismark/sample3.cov.gz"],
+                               verbose=False)
+    finally:
+        os.chdir(old)
+    expected = EDGER["bismark2pc"]
+    assert list(y["genes"].index) == expected["ids"]
+    assert list(y["samples"].index) == expected["samples"]
+    np.testing.assert_array_equal(y["counts"], _as_array(expected["counts"]))
+    np.testing.assert_array_equal(y["counts2"], _as_array(expected["counts2"]))
+    assert list(y["genes"]["Chr"].astype(str)) == expected["Chr"]
+    assert list(y["genes"]["Chr"].cat.categories) == expected["chr_levels"]
+    np.testing.assert_array_equal(y["genes"]["Locus"], _as_array(expected["Locus"]))
+
+
+def test_pclist_subsetting_and_top_tags(bin_fits):
+    pc = _pclist()
+    sub = pc[np.arange(10, 20), [0, 1, 2]]
+    np.testing.assert_array_equal(sub["counts2"], UNMETH[10:20, :3])
+    assert list(sub["samples"]["group"].cat.categories) == ["A"]
+    res = ep.bin_ql_ftest(bin_fits["additive"])
+    top = ep.top_tags(res, n=5)["table"]
+    assert list(top.columns[:2]) == ["logOR", "logCPM"]
+    assert np.all(np.diff(top["PValue"].to_numpy()) >= 0)
+    de = ep.decide_tests(res, lfc=1)
+    assert set(np.unique(de)) <= {-1, 0, 1}
+    assert np.all(de[np.abs(res["table"]["logOR"].to_numpy()) < 1] == 0)
+    # A DGEBIN row subset keeps counts2 alongside counts
+    s = bin_fits["additive"][np.arange(5), None]
+    assert s["counts2"].shape == (5, 6) and s["coefficients"].shape == (5, 4)
+
+
+def test_pclist_mds_and_dgebin_md_plots(bin_fits):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    ep.plot_mds(_pclist())
+    assert plt.gcf().axes[0].get_xlabel().startswith("Leading logOR dim 1")
+    ep.plot_md(bin_fits["weights"])
+    assert plt.gcf().axes[0].get_ylabel() == "log-odds-ratio"
+    plt.close("all")

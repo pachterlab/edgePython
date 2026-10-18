@@ -352,6 +352,63 @@ class DGEGLM(_EdgeRBase):
         return 0
 
 
+class PCList(_EdgeRBase):
+    """Paired counts (e.g. methylated and unmethylated reads) for the same
+    features and samples.
+
+    Attributes
+    ----------
+    counts, counts2 : ndarray
+        Features x samples matrices of paired counts.
+    samples : DataFrame
+        Sample information with column group.
+    genes : DataFrame or None
+        Feature annotation.
+    """
+
+    _IJ = {'counts', 'counts2', 'weights'}
+    _IX = {'genes'}
+    _JX = {'samples'}
+    _I = {'AveLogCPM'}
+
+    def __getitem__(self, key):
+        if isinstance(key, str):
+            return super().__getitem__(key)
+        if not (isinstance(key, tuple) and len(key) == 2):
+            raise IndexError("Two subscripts required")
+        i, j = key
+        i_idx = _resolve_index(i, _get_rownames(self))
+        j_idx = _resolve_index(j, _get_colnames(self))
+        out = self._copy()
+        for k in self._IJ:
+            if k in out and out[k] is not None:
+                out[k] = _subset_matrix_or_df(out[k], i_idx, j_idx)
+        for k in self._IX:
+            if k in out and out[k] is not None:
+                out[k] = _subset_matrix_or_df(out[k], i_idx)
+        for k in self._JX:
+            if k in out and out[k] is not None:
+                out[k] = _subset_matrix_or_df(out[k], j_idx)
+        for k in self._I:
+            if k in out and out[k] is not None:
+                out[k] = _subset_matrix_or_df(out[k], i_idx)
+        if not (isinstance(j, slice) and j == slice(None)) and 'samples' in out:
+            out['samples'] = out['samples'].copy()
+            out['samples']['group'] = pd.Categorical(out['samples']['group']).remove_unused_categories()
+        return out
+
+    @property
+    def shape(self):
+        return self['counts'].shape
+
+
+class DGEBIN(DGEGLM):
+    """Binomial GLM fit from bin_fit() or bin_ql_fit(): as DGEGLM, with
+    counts2 (failures) beside counts (successes)."""
+
+    _IX = DGEGLM._IX | {'counts2'}
+
+
 class DGELRT(_EdgeRBase):
     """Likelihood ratio test results for DGE GLMs.
 

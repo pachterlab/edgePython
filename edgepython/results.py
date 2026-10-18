@@ -134,11 +134,13 @@ def top_tags(obj, n=10, adjust_method='BH', sort_by='PValue', p_value=1.0,
         adj_name = None
 
     # Sort
+    # Binomial tests (bin_ql_ftest) report log2 odds ratios as logOR
+    lfc_col = 'logFC' if 'logFC' in tab.columns else 'logOR'
     if sort_by == 'PValue':
-        alfc = np.abs(tab['logFC'].values) if 'logFC' in tab.columns else np.zeros(len(tab))
+        alfc = np.abs(tab[lfc_col].values) if lfc_col in tab.columns else np.zeros(len(tab))
         o = np.lexsort((-alfc, raw_pvals))
     elif sort_by == 'logFC':
-        alfc = np.abs(tab['logFC'].values) if 'logFC' in tab.columns else np.zeros(len(tab))
+        alfc = np.abs(tab[lfc_col].values) if lfc_col in tab.columns else np.zeros(len(tab))
         o = np.argsort(-alfc)
     else:
         o = np.arange(len(tab))
@@ -213,14 +215,16 @@ def decide_tests(obj, adjust_method='BH', p_value=0.05, lfc=0):
 
     is_de = (adj_p < p_value).astype(int)
 
-    # Get logFC
-    logFC = obj['table'].get('logFC')
+    # Get logFC (logOR for binomial tests, which have no dispersion)
+    prefix = 'logOR' if obj.get('dispersion') is None and any(
+        c.startswith('logOR') for c in obj['table'].columns) else 'logFC'
+    logFC = obj['table'].get(prefix)
     f_test = logFC is None
 
     if f_test:
         # F-test with multiple logFC columns
         if lfc > 0:
-            coef_cols = [c for c in obj['table'].columns if c.startswith('logFC')]
+            coef_cols = [c for c in obj['table'].columns if c.startswith(prefix)]
             if coef_cols:
                 logFC_mat = obj['table'][coef_cols].values
                 small_fc = np.all(np.abs(logFC_mat) < lfc, axis=1)

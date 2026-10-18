@@ -200,12 +200,21 @@ def ave_log_cpm(y, lib_size=None, offset=None, prior_count=2, dispersion=None,
 
     Port of edgeR's aveLogCPM().
     """
+    # PCList input: log2 CPM of the total coverage (aveLogCPM.PCList)
+    if isinstance(y, dict) and 'counts2' in y and 'coefficients' not in y:
+        total = np.asarray(y['counts'], dtype=np.float64) + np.asarray(y['counts2'], dtype=np.float64)
+        return _ave_log_cpm_default(total, lib_size=total.sum(axis=0), prior_count=prior_count,
+                                    dispersion=0, weights=y.get('weights'))
+
     # DGEGLM input: the fit's offset, dispersion and weights (aveLogCPM.DGEGLM)
     if isinstance(y, dict) and 'counts' in y and 'coefficients' in y:
         if dispersion is None:
             dispersion = y.get('dispersion')
         if dispersion is None:
-            return _ave_log_cpm_default(y['counts'], prior_count=prior_count,
+            counts = np.asarray(y['counts'], dtype=np.float64)
+            if y.get('counts2') is not None:
+                counts = counts + np.asarray(y['counts2'], dtype=np.float64)
+            return _ave_log_cpm_default(counts, prior_count=prior_count,
                                         dispersion=0, weights=y.get('weights'))
         return _ave_log_cpm_default(y['counts'], offset=y.get('offset'),
                                     prior_count=prior_count, dispersion=dispersion,

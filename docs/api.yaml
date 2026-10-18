@@ -2627,6 +2627,261 @@ api:
     tests:
       - test_edger5_parity.py
 
+  - name: make_pclist
+    kind: function
+    domain: binomial
+    module: edgepython.binomial
+    r_equivalent: PCList
+    description: >-
+      Create a PCList of paired counts (e.g. methylated and unmethylated
+      reads) for the same features and samples.
+    params:
+      - name: counts
+        type: ndarray
+        default: null
+      - name: counts2
+        type: ndarray
+        default: null
+      - name: samples
+        type: DataFrame
+        default: null
+      - name: group
+        type: list
+        default: null
+      - name: genes
+        type: DataFrame
+        default: null
+    returns:
+      type: PCList
+    impl_status: complete
+    test_status: tested
+    tests:
+      - test_edger5_parity.py
+
+  - name: read_bismark2pc
+    kind: function
+    domain: io
+    module: edgepython.binomial
+    r_equivalent: readBismark2PC
+    description: >-
+      Read Bismark coverage files into a PCList of methylated and
+      unmethylated counts.
+    params:
+      - name: files
+        type: list
+        default: null
+      - name: sample_names
+        type: list
+        default: null
+      - name: verbose
+        type: bool
+        default: true
+    returns:
+      type: PCList
+    impl_status: complete
+    test_status: tested
+    tests:
+      - test_edger5_parity.py
+
+  - name: rowsum_pclist
+    kind: function
+    domain: binomial
+    module: edgepython.binomial
+    r_equivalent: rowsum.PCList
+    description: >-
+      Sum a PCList's paired counts over groups of rows.
+    params:
+      - name: x
+        type: PCList
+        default: null
+      - name: group
+        type: list
+        default: null
+    returns:
+      type: PCList
+    impl_status: complete
+    test_status: tested
+    tests:
+      - test_edger5_parity.py
+
+  - name: bin_fit
+    kind: function
+    domain: binomial
+    module: edgepython.binomial
+    r_equivalent: binFit
+    description: >-
+      Fit a binomial GLM for each feature of paired counts (one-way
+      shortcut or IWLS).
+    params:
+      - name: y
+        type: PCList
+        default: null
+      - name: counts2
+        type: ndarray
+        default: null
+      - name: design
+        type: ndarray
+        default: null
+      - name: weights
+        type: ndarray
+        default: null
+      - name: offset
+        type: ndarray
+        default: null
+      - name: prior_count
+        type: float
+        default: 1
+    returns:
+      type: DGEBIN
+    impl_status: complete
+    test_status: tested
+    tests:
+      - test_edger5_parity.py
+
+  - name: bin_ql_fit
+    kind: function
+    domain: binomial
+    module: edgepython.binomial
+    r_equivalent: binQLFit
+    description: >-
+      Fit quasi-binomial GLMs with bias-adjusted deviances and empirical
+      Bayes quasi-dispersions.
+    params:
+      - name: y
+        type: PCList
+        default: null
+      - name: counts2
+        type: ndarray
+        default: null
+      - name: design
+        type: ndarray
+        default: null
+      - name: weights
+        type: ndarray
+        default: null
+      - name: offset
+        type: ndarray
+        default: null
+      - name: ave_log_cpm
+        type: ndarray
+        default: null
+      - name: abundance_trend
+        type: bool
+        default: true
+      - name: covariate_trend
+        type: ndarray
+        default: null
+      - name: robust
+        type: bool
+        default: true
+      - name: prior_count
+        type: float
+        default: 1
+    returns:
+      type: DGEBIN
+    impl_status: complete
+    test_status: tested
+    tests:
+      - test_edger5_parity.py
+
+  - name: bin_ql_ftest
+    kind: function
+    domain: binomial
+    module: edgepython.binomial
+    r_equivalent: binQLFTest
+    description: >-
+      Quasi-likelihood F-tests for binomial GLMs, with TREAT/UPSHOT
+      odds-ratio thresholds.
+    params:
+      - name: glmfit
+        type: DGEBIN
+        default: null
+      - name: coef
+        type: int
+        default: null
+      - name: contrast
+        type: ndarray
+        default: null
+      - name: or_
+        type: float
+        default: 1.0
+      - name: lor
+        type: float
+        default: null
+      - name: upshot
+        type: bool
+        default: true
+    returns:
+      type: DGELRT
+    impl_status: complete
+    test_status: tested
+    tests:
+      - test_edger5_parity.py
+
+  - name: mbin_one_way
+    kind: function
+    domain: binomial
+    module: edgepython.binomial
+    r_equivalent: mbinOneWay
+    description: >-
+      Fit one-way layout binomial models by groupwise weighted means.
+    params:
+      - name: y
+        type: ndarray
+        default: null
+      - name: z
+        type: ndarray
+        default: null
+      - name: design
+        type: ndarray
+        default: null
+      - name: group
+        type: list
+        default: null
+      - name: offset
+        type: ndarray
+        default: null
+      - name: weights
+        type: ndarray
+        default: null
+    returns:
+      type: dict
+    impl_status: complete
+    test_status: tested
+    tests:
+      - test_edger5_parity.py
+
+  - name: mbin_iwls
+    kind: function
+    domain: binomial
+    module: edgepython.binomial
+    r_equivalent: mbinIWLS
+    description: >-
+      Fit binomial logistic models by iteratively reweighted least
+      squares.
+    params:
+      - name: y
+        type: ndarray
+        default: null
+      - name: z
+        type: ndarray
+        default: null
+      - name: design
+        type: ndarray
+        default: null
+      - name: offset
+        type: ndarray
+        default: null
+      - name: weights
+        type: ndarray
+        default: null
+    returns:
+      type: dict
+    impl_status: complete
+    test_status: tested
+    tests:
+      - test_edger5_parity.py
+
   - name: feature_counts_to_dgelist
     kind: function
     domain: io

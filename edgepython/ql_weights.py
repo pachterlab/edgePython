@@ -683,10 +683,13 @@ def sample_weights(glmfit):
     """Empirical sample (quality) weights from adjusted unit deviances.
 
     Port of edgeR 5.0's sampleWeights() for a fit from glm_ql_fit (with
-    legacy=False). The quasi-dispersion of each observation is taken to be
+    legacy=False), or a binomial fit from bin_fit() or bin_ql_fit(). The quasi-dispersion of each observation is taken to be
     s2_g / w_i; returns the sample weights w_i, scaled to geometric mean 1,
     as a genes x samples matrix (each row the same) for use as weights.
     """
+    if glmfit.get('counts2') is not None:
+        from .binomial import _sample_weights_bin
+        return _sample_weights_bin(glmfit)
     if glmfit.get('average.ql.dispersion') is None:
         raise ValueError("Please run glm_ql_fit with legacy=False first")
     y = np.asarray(glmfit['counts'], dtype=np.float64)
