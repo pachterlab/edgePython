@@ -214,6 +214,29 @@ for (m in c("bin.spline", "bin.loess")) {
   out[[paste0("classic_trended_", m)]] <- estimateTrendedDisp(estimateCommonDisp(dgebig), method = m)$trended.dispersion
 }
 
+# filterByExpr: groups, designs (hat() adds an intercept), presets, and the
+# max.n.samples cap with two groups of 70
+keep_values <- function(k) as.integer(k)
+# cpm as edgeR computes it: y * 1e6 / lib.size, and the log with prior counts
+out$cpm_raw <- cpm(counts, lib.size = lib.size)
+out$cpm_log <- cpm(counts, lib.size = lib.size, log = TRUE, prior.count = 2)
+inputs$lib_size <- lib.size
+dgef <- DGEList(counts, group = group)
+out$filter_group <- keep_values(filterByExpr(dgef))
+out$filter_design <- keep_values(filterByExpr(dgef, design = inputs$additive))
+inputs$filter_covariate <- seq(-1, 1, length.out = nlibs)^3
+out$filter_covariate <- keep_values(filterByExpr(counts, design = cbind(inputs$filter_covariate)))
+out$filter_min_sample_size <- keep_values(filterByExpr(dgef, min.sample.size = 2))
+for (p in c("stringent", "moderate", "lenient"))
+  out[[paste0("filter_", p)]] <- keep_values(filterByExpr(dgef, preset = p))
+set.seed(9)
+inputs$filter_large <- matrix(rnbinom(400 * 140, mu = rep(rgamma(400, 0.4, 0.03), 140), size = 3), 400, 140)
+storage.mode(inputs$filter_large) <- "double"
+inputs$filter_large_group <- rep(1:2, each = 70)
+out$filter_large <- keep_values(filterByExpr(inputs$filter_large, group = inputs$filter_large_group))
+out$filter_large_nocap <- keep_values(filterByExpr(inputs$filter_large, group = inputs$filter_large_group,
+                                                   max.n.samples = Inf))
+
 # Unequal-df squeezeVar on enough genes that the loess span is below 1
 set.seed(7)
 inputs$sv2_var <- rchisq(2000, 4) / 4 * exp(rnorm(2000, 0, 0.3))

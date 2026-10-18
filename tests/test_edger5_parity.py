@@ -445,3 +445,51 @@ def test_r_optimizers_reproduce_r():
     np.testing.assert_allclose(par, [1.0002601387256695, 1.000505999303765], rtol=1e-15)
     assert value == pytest.approx(8.8252410967227472e-08, rel=1e-13)
     assert uniroot_brent(lambda x: x ** 3 - 2 * x - 5, 2, 3, tol=1e-5) == 2.0945512665841388
+
+
+def test_cpm_matches_edger():
+    # Raw CPM is y * 1e6 / lib.size; filter_by_expr compares it with a cutoff
+    # that it can equal exactly, which the filter tests check. (The JSON file
+    # holds 15 significant digits.)
+    lib_size = _as_array(INPUTS["lib_size"])
+    np.testing.assert_allclose(ep.cpm(COUNTS, lib_size=lib_size), _edger("cpm_raw"), rtol=1e-13)
+    np.testing.assert_allclose(ep.cpm(COUNTS, lib_size=lib_size, log=True, prior_count=2),
+                               _edger("cpm_log"), rtol=1e-13)
+
+
+FILTER_CASES = {
+    "filter_group": {},
+    "filter_design": {"design": "additive"},
+    "filter_min_sample_size": {"min_sample_size": 2},
+    "filter_stringent": {"preset": "stringent"},
+    "filter_moderate": {"preset": "moderate"},
+    "filter_lenient": {"preset": "lenient"},
+}
+
+
+@pytest.mark.parametrize("case", list(FILTER_CASES))
+def test_filter_by_expr_matches_edger5(case):
+    kwargs = dict(FILTER_CASES[case])
+    if "design" in kwargs:
+        kwargs["design"] = _as_array(INPUTS[kwargs["design"]])
+    dge = ep.make_dgelist(COUNTS, group=np.repeat(["A", "B", "C"], 3))
+    np.testing.assert_array_equal(ep.filter_by_expr(dge, **kwargs), _edger(case).astype(bool))
+
+
+def test_filter_by_expr_design_without_intercept():
+    # R's hat() adds an intercept column to the design
+    design = _as_array(INPUTS["filter_covariate"]).reshape(-1, 1)
+    np.testing.assert_array_equal(ep.filter_by_expr(COUNTS, design=design),
+                                  _edger("filter_covariate").astype(bool))
+
+
+def test_filter_by_expr_caps_min_sample_size():
+    # Two groups of 70: 10 + 0.7 * 60 = 52 samples, capped at max.n.samples = 40
+    y = _as_array(INPUTS["filter_large"])
+    group = _as_array(INPUTS["filter_large_group"])
+    np.testing.assert_array_equal(ep.filter_by_expr(y, group=group),
+                                  _edger("filter_large").astype(bool))
+    np.testing.assert_array_equal(ep.filter_by_expr(y, group=group, max_n_samples=np.inf),
+                                  _edger("filter_large_nocap").astype(bool))
+    with pytest.warns(UserWarning, match="Ignoring arguments set individually"):
+        ep.filter_by_expr(y, group=group, preset="lenient", min_count=5)

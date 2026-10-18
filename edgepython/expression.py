@@ -91,24 +91,17 @@ def _cpm_default(y, lib_size=None, offset=None, log=False, prior_count=2):
         out = add_prior_count(y, lib_size=lib_size if lib_size.ndim == 1 else None,
                               offset=np.log(lib_size) if lib_size.ndim == 1 else offset,
                               prior_count=prior_count)
+        # As edgeR's calc_cpm_log: (log(y + prior) - log(lib + 2 prior)
+        # + log(1e6)) / log(2), NaN where y + prior is not positive
         y_aug = out['y']
-        offset_aug = out['offset']
-
-        if isinstance(offset_aug, np.ndarray) and offset_aug.ndim == 1:
-            lib_size_aug = np.exp(offset_aug)
-        else:
-            lib_size_aug = np.exp(offset_aug)
-
-        if lib_size_aug.ndim == 1:
-            result = np.log2(y_aug / lib_size_aug[np.newaxis, :] * 1e6)
-        else:
-            result = np.log2(y_aug / lib_size_aug * 1e6)
+        offset_aug = np.asarray(out['offset'], dtype=np.float64)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            result = (np.log(y_aug) - offset_aug + np.log(1e6)) / np.log(2)
+        result[~(y_aug > 0)] = np.nan
         return result
     else:
-        if lib_size.ndim == 1:
-            return y / lib_size[np.newaxis, :] * 1e6
-        else:
-            return y / lib_size * 1e6
+        # As edgeR's calc_cpm_raw: y * 1e6 / lib.size
+        return y * 1e6 / (lib_size[np.newaxis, :] if lib_size.ndim == 1 else lib_size)
 
 
 def rpkm(y, gene_length, lib_size=None, offset=None, log=False, prior_count=2,
