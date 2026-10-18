@@ -111,6 +111,37 @@ out$ftest_new_contrast2 <- ftest_values(glmQLFTest(fit_new, contrast = inputs$co
 out$ftest_legacy <- ftest_values(glmQLFTest(fit_legacy, coef = 5))
 out$ftest_legacy_upshot <- ftest_values(glmQLFTest(fit_legacy, coef = 5, lfc = lfc))
 
+# glmTreat: the new default (legacy = FALSE) and legacy methods, for LR and
+# QL fits. With legacy = TRUE and the interval null, edgeR drops NAs from a logical
+# index (j <- j[!is.na(j)]), which misaligns the p-values of later genes
+# when some genes are NA (here the all-zero genes). The references use
+# edgeR's glmTreat with that index corrected (NAs set to FALSE).
+src <- deparse(edgeR::glmTreat)
+stopifnot(sum(grepl("j <- j[!is.na(j)]", src, fixed = TRUE)) == 1)
+glmTreatFixed <- eval(parse(text = sub("j <- j[!is.na(j)]", "j[is.na(j)] <- FALSE", src, fixed = TRUE)),
+                      envir = asNamespace("edgeR"))
+treat_values <- function(res) {
+  tab <- res$table
+  list(logFC = tab$logFC, unshrunk_logFC = tab$unshrunk.logFC, pvalue = tab$PValue)
+}
+fit_lrt <- glmFit(dge, inputs$additive)
+fit_lrt0 <- glmFit(dge, inputs$additive, prior.count = 0)
+for (legacy in c(FALSE, TRUE)) {
+  sfx <- if (legacy) "_legacy" else ""
+  treat <- function(fit, ...) treat_values(glmTreatFixed(fit, lfc = lfc, legacy = legacy, ...))
+  out[[paste0("treat_lrt", sfx)]] <- treat(fit_lrt, coef = 5)
+  out[[paste0("treat_lrt_worst", sfx)]] <- treat(fit_lrt, coef = 5, null = "worst.case")
+  out[[paste0("treat_lrt_unshrunk", sfx)]] <- treat(fit_lrt0, coef = 5)
+  out[[paste0("treat_ql", sfx)]] <- treat(fit_new, coef = 5)
+  out[[paste0("treat_ql_worst", sfx)]] <- treat(fit_new, coef = 5, null = "worst.case")
+  out[[paste0("treat_ql_contrast", sfx)]] <- treat(fit_new, contrast = c(0, 0, 0, 1, -1))
+  # edgeR 4.99.8 never sets poisson.bound for legacy QL fits and so fails
+  # on them; a global poisson.bound = TRUE (edgeR 4's value, found by R's
+  # scoping) gives the intended result
+  poisson.bound <- TRUE
+  out[[paste0("treat_qllegacy", sfx)]] <- treat(fit_legacy, coef = 5)
+  rm(poisson.bound)
+}
 # Unequal-df squeezeVar on enough genes that the loess span is below 1
 set.seed(7)
 inputs$sv2_var <- rchisq(2000, 4) / 4 * exp(rnorm(2000, 0, 0.3))

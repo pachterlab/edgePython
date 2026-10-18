@@ -252,3 +252,56 @@ def test_contrast_as_coef_matches_limma_with_pivoting():
     beta = np.linalg.lstsq(reform["design"], design @ np.arange(1.0, 6.0), rcond=None)[0]
     np.testing.assert_allclose(reform["design"] @ beta, design @ np.arange(1.0, 6.0), atol=1e-12)
     np.testing.assert_allclose(beta[:2], contrast[:, [0, 2]].T @ np.arange(1.0, 6.0), atol=1e-12)
+
+
+@pytest.fixture(scope="module")
+def treat_fits():
+    design = _as_array(INPUTS["additive"])
+    dge = ep.estimate_disp(ep.calc_norm_factors(ep.make_dgelist(COUNTS)), design)
+    return {"lrt": ep.glm_fit(dge, design), "lrt0": ep.glm_fit(dge, design, prior_count=0),
+            "ql": ep.glm_ql_fit(dge, design, robust=True),
+            "qllegacy": ep.glm_ql_fit(dge, design, robust=True, legacy=True)}
+
+
+TREAT_CASES = {
+    "treat_lrt": ("lrt", {}),
+    "treat_lrt_worst": ("lrt", {"null": "worst.case"}),
+    "treat_lrt_unshrunk": ("lrt0", {}),
+    "treat_ql": ("ql", {}),
+    "treat_ql_worst": ("ql", {"null": "worst.case"}),
+    "treat_ql_contrast": ("ql", {"coef": None, "contrast": np.array([0, 0, 0, 1, -1.0])}),
+    "treat_qllegacy": ("qllegacy", {}),
+}
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("case", list(TREAT_CASES))
+def test_glm_treat_matches_edger5(treat_fits, case, legacy):
+    # legacy=False is edgeR 5.0's new default. The references for legacy
+    # QL fits and for legacy=True come from edgeR with two bugs worked around
+    # (see edger5_parity.R): poisson.bound unset for legacy QL fits, and a
+    # misaligned index when some genes are NA.
+    which, kwargs = TREAT_CASES[case]
+    key = case + ("_legacy" if legacy else "")
+    args = {"coef": 4, "lfc": np.log2(1.5), "legacy": legacy, **kwargs}
+    table = ep.glm_treat(treat_fits[which], **args)["table"]
+    # LR and legacy QL fits use estimate_disp's dispersions, about 5e-6 off
+    rtol = 1e-7 if which == "ql" else 1e-4
+    _assert_close(table["PValue"], _edger(key, "pvalue"), rtol=rtol, atol=1e-12)
+    _assert_close(table["logFC"], _edger(key, "logFC"), rtol=rtol, atol=1e-9)
+    if which == "lrt0":
+        assert "unshrunk.logFC" not in table.columns
+    else:
+        _assert_close(table["unshrunk.logFC"], _edger(key, "unshrunk_logFC"), rtol=rtol, atol=1e-9)
+
+
+def test_glm_treat_legacy_p_values_are_genewise(treat_fits):
+    # A gene's p-value must not depend on whether other genes are NA
+    fit = treat_fits["lrt"]
+    nonzero = COUNTS.sum(axis=1) > 0
+    full = ep.glm_treat(fit, coef=4, lfc=np.log2(1.5), legacy=True)["table"]["PValue"].to_numpy()
+    sub = {k: (v[nonzero] if isinstance(v, np.ndarray) and v.shape[:1] == (COUNTS.shape[0],) else v)
+           for k, v in fit.items()}
+    part = ep.glm_treat(sub, coef=4, lfc=np.log2(1.5), legacy=True)["table"]["PValue"].to_numpy()
+    assert np.all(np.isnan(full[~nonzero]))
+    np.testing.assert_allclose(full[nonzero], part, rtol=1e-12)
