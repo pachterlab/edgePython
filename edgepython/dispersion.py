@@ -379,12 +379,14 @@ def WLEB(theta, loglik, prior_n=5, covariate=None, trend_method='locfit',
     if covariate is None:
         trend_method = 'none'
 
-    # Set span matching R's WLEB formula exactly
+    # Set span matching R's WLEB formula exactly: chooseLowessSpan(ntags),
+    # or chooseLowessSpan(ntags, small.n=50, min.span=0.25, power=0.5)
+    # with legacy.span
     if span is None:
-        if ntags <= 50:
-            span = 1.0
+        if legacy_span:
+            span = min(0.25 + 0.75 * (50 / ntags) ** 0.5, 1.0)
         else:
-            span = 0.25 + 0.75 * (50 / ntags) ** 0.5
+            span = min(0.3 + 0.7 * (50 / ntags) ** (1 / 3), 1.0)
 
     out = {'span': span}
 
