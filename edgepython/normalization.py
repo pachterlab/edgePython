@@ -199,7 +199,10 @@ def _calc_factor_tmm(obs, ref, libsize_obs=None, libsize_ref=None,
         nR = libsize_ref
 
     with np.errstate(divide='ignore', invalid='ignore'):
-        logR = np.log2(obs / nO) - np.log2(ref / nR)
+        # One quotient, as in edgeR's .calcFactorTMM. With integer counts
+        # many rows tie exactly, and log2(a) - log2(b) rounds differently,
+        # which changes how ties are ranked and so which rows are trimmed.
+        logR = np.log2((obs / nO) / (ref / nR))
         absE = (np.log2(obs / nO) + np.log2(ref / nR)) / 2
         v = (nO - obs) / nO / obs + (nR - ref) / nR / ref
 
