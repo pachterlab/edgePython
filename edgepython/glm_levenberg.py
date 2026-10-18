@@ -281,17 +281,7 @@ def nbinom_deviance(y, mean, dispersion=0, weights=None):
             d_mat = d[:, None]  # (ngenes, 1)
         else:
             d_mat = d  # (ngenes, nlibs)
-        unit_dev = np.zeros_like(y)
-        pos = y > 0
-        if np.any(pos):
-            d_pos = np.broadcast_to(d_mat, y.shape)[pos]
-            unit_dev[pos] = 2 * (y[pos] * np.log(y[pos] / mean[pos]) -
-                                  (y[pos] + 1.0 / d_pos) * np.log((1 + d_pos * y[pos]) /
-                                                                    (1 + d_pos * mean[pos])))
-        zero = ~pos
-        if np.any(zero):
-            d_zero = np.broadcast_to(d_mat, y.shape)[zero]
-            unit_dev[zero] = 2.0 / d_zero * np.log(1 + d_zero * mean[zero])
+        unit_dev = _unit_deviance_by_element(y, mean, np.broadcast_to(d_mat, y.shape))
 
     unit_dev = np.maximum(unit_dev, 0)
     if w is not None:
@@ -341,15 +331,32 @@ def _unit_nb_deviance(y, mu, dispersion):
         if np.any(zero):
             dev[zero] = 2 / disp * np.log(1 + disp * mu[zero])
     else:
-        if np.any(pos):
-            dev[pos] = 2 * (y[pos] * np.log(y[pos] / mu[pos]) -
-                            (y[pos] + 1 / disp[pos]) * np.log((1 + disp[pos] * y[pos]) /
-                                                               (1 + disp[pos] * mu[pos])))
-        if np.any(zero):
-            d_z = disp[zero]
-            dev[zero] = 2 / d_z * np.log(1 + d_z * mu[zero])
+        dev = _unit_deviance_by_element(y, mu, np.broadcast_to(disp, y.shape))
 
     return np.maximum(dev, 0)
+
+
+def _unit_deviance_by_element(y, mu, disp):
+    """Unit deviance with a dispersion per element.
+
+    As in edgeR, a zero dispersion gives the Poisson deviance for that
+    element, so an array of zeros is a Poisson fit rather than 0/0.
+    """
+    dev = np.zeros_like(y)
+    pos = y > 0
+    pois = disp == 0
+    m = pos & pois
+    dev[m] = 2 * (y[m] * np.log(y[m] / mu[m]) - (y[m] - mu[m]))
+    m = ~pos & pois
+    dev[m] = 2 * mu[m]
+    m = pos & ~pois
+    d = disp[m]
+    dev[m] = 2 * (y[m] * np.log(y[m] / mu[m]) -
+                  (y[m] + 1 / d) * np.log((1 + d * y[m]) / (1 + d * mu[m])))
+    m = ~pos & ~pois
+    d = disp[m]
+    dev[m] = 2 / d * np.log(1 + d * mu[m])
+    return dev
 
 
 def _unit_deviance_sum(y, mu, disp, weights):
