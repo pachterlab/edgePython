@@ -2,7 +2,7 @@
 # Machine-readable specification with typed schema and controlled vocabularies.
 #
 # Schema version: 1.0.0
-# Generated: 2025-02-09
+# Generated: 2025-02-09; updated 2026-10-19 for edgePython 0.5.0
 # Format: YAML 1.2
 
 # =====================================================================
@@ -11,30 +11,34 @@
 
 package:
   name: edgePython
-  version: "0.1.0"
+  version: "0.5.0"
   description: >-
     Python port of the edgeR Bioconductor package for empirical analysis
     of digital gene expression data.
   license: GPL-3.0-or-later
   upstream:
     package: edgeR
-    version: "3.36.0"
+    version: "5.0"
+    checked_against: edgeR 4.99.8 and limma 3.99.2 (the development versions that become edgeR 5.0)
     source: Bioconductor
     url: https://bioconductor.org/packages/edgeR/
     language: R
-  python_requires: ">=3.8"
+  python_requires: ">=3.9"
   dependencies:
     required:
       - numpy
       - scipy
       - pandas
+      - matplotlib
+      - statsmodels
+      - numba
     optional:
-      - matplotlib  # visualization
-      - anndata     # AnnData interop
       - h5py        # kallisto HDF5
+      - anndata     # AnnData interop
+      - pyarrow     # oarfish bootstraps (Parquet)
+      - patsy       # formula design matrices
       - pybiomart   # nearestTSS gene annotation
       - gprofiler-official  # goana/kegga enrichment
-      - numba        # JIT compilation for single-cell fitting
 
 # =====================================================================
 # Controlled vocabularies
@@ -61,6 +65,7 @@ vocabularies:
     - utilities          # Statistical and data utilities
     - limma              # Functions ported from limma
     - single_cell        # Single-cell NB mixed model (NEBULA-LN)
+    - binomial           # Paired counts and binomial GLMs (e.g. methylation)
 
   # Type of API entry
   kind:
@@ -71,6 +76,9 @@ vocabularies:
   param_type:
     - ndarray            # numpy.ndarray
     - DGEList            # edgePython DGEList dict
+    - PCList             # edgePython PCList of paired counts
+    - DGEGLM             # Fitted negative binomial GLM
+    - DGEBIN             # Fitted binomial GLM
     - DataFrame          # pandas.DataFrame
     - Series             # pandas.Series
     - AnnData            # anndata.AnnData
@@ -86,6 +94,9 @@ vocabularies:
   # Return value types
   return_type:
     - DGEList
+    - PCList
+    - DGEBIN
+    - DGELRT
     - dict               # Generic result dict (DGELRT, DGEExact, etc.)
     - DataFrame
     - ndarray
@@ -94,6 +105,8 @@ vocabularies:
     - float
     - int
     - bool
+    - str
+    - list
     - None
     - Figure             # matplotlib Figure
 
@@ -523,10 +536,14 @@ api:
       Digital Gene Expression data list. Stores counts, sample info,
       gene annotation, normalization factors, and dispersion estimates.
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_classes.py
       - test_dgelist.py
+      - test_edger5_parity.py
+      - test_edger_ql_parity.py
+      - test_r_vs_py.py
+      - test_splicing.py
     citations:
       - robinson2010edger
 
@@ -591,6 +608,33 @@ api:
     citations:
       - robinson2010edger
 
+  - name: PCList
+    kind: class
+    domain: classes
+    module: edgepython.classes
+    r_equivalent: PCList
+    description: >-
+      Paired counts, such as methylated and unmethylated reads, for the
+      same features and samples: counts and counts2 matrices with samples
+      and genes annotation. Subsetting with [i, j] keeps the pairs aligned.
+    impl_status: complete
+    test_status: tested_r_comparison
+    test_files:
+      - test_edger5_parity.py
+
+  - name: DGEBIN
+    kind: class
+    domain: classes
+    module: edgepython.classes
+    r_equivalent: DGEBIN
+    description: >-
+      Binomial GLM fit from bin_fit or bin_ql_fit: as DGEGLM, with counts2
+      (failures) beside counts (successes).
+    impl_status: complete
+    test_status: tested_r_comparison
+    test_files:
+      - test_edger5_parity.py
+
   - name: CompressedMatrix
     kind: class
     domain: classes
@@ -619,9 +663,10 @@ api:
     returns:
       type: DGEList
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_dgelist.py
+      - test_edger5_parity.py
 
   - name: rbind_dgelist
     kind: function
@@ -638,9 +683,10 @@ api:
     returns:
       type: DGEList
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_dgelist.py
+      - test_edger5_parity.py
 
   # -----------------------------------------------------------------
   # DGEList construction and accessors
@@ -687,6 +733,19 @@ api:
     test_files:
       - test_dgelist.py
       - test_r_vs_py.py
+      - test_backward_compat.py
+      - test_dispersion.py
+      - test_edger5_parity.py
+      - test_edger_ql_parity.py
+      - test_exact_test.py
+      - test_expression.py
+      - test_gene_sets.py
+      - test_glm.py
+      - test_io.py
+      - test_splicing.py
+      - test_treat.py
+      - test_utilities.py
+      - test_visualization.py
     citations:
       - robinson2010edger
 
@@ -777,9 +836,10 @@ api:
     returns:
       type: ndarray
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_dgelist.py
+      - test_edger5_parity.py
 
   - name: get_norm_lib_sizes
     kind: function
@@ -818,13 +878,39 @@ api:
     params:
       - name: counts
         type: [DGEList, ndarray]
+      - name: lib_size
+        type: ndarray
+        description: Library sizes.
       - name: method
         type: str
         default: TMM
+      - name: ref_column
+        type: int
+        description: Reference column for TMM/TMMwsp.
+      - name: logratio_trim
+        type: float
+        default: 0.3
+        description: Amount of trim for log-ratios (TMM).
+      - name: sum_trim
+        type: float
+        default: 0.05
+        description: Amount of trim for sums (TMM).
+      - name: do_weighting
+        type: bool
+        default: true
+        description: Use precision weights in TMM.
+      - name: a_cutoff
+        type: float
+        default: -10000000000.0
+        description: Abundance cutoff for TMM.
+      - name: p
+        type: float
+        default: 0.75
+        description: Quantile for upper-quartile method.
     returns:
       type: [DGEList, ndarray]
     impl_status: complete
-    test_status: tested
+    test_status: tested_r_comparison
     test_files:
       - test_edger5_parity.py
 
@@ -874,6 +960,18 @@ api:
     test_files:
       - test_dgelist.py
       - test_r_vs_py.py
+      - test_backward_compat.py
+      - test_dispersion.py
+      - test_edger5_parity.py
+      - test_edger_ql_parity.py
+      - test_exact_test.py
+      - test_expression.py
+      - test_gene_sets.py
+      - test_glm.py
+      - test_splicing.py
+      - test_treat.py
+      - test_utilities.py
+      - test_visualization.py
     citations:
       - robinson2010norm
 
@@ -990,12 +1088,18 @@ api:
       - name: normalized_lib_sizes
         type: bool
         default: true
+      - name: offset_prior
+        type: ndarray
+        description: Genes x samples log-scale adjustments to the library sizes, which become exp(log(lib_size) + offset_prior).
     returns:
       type: ndarray
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_expression.py
+      - test_dgelist.py
+      - test_edger5_parity.py
+      - test_gene_sets.py
     citations:
       - robinson2010edger
 
@@ -1026,12 +1130,16 @@ api:
       - name: normalized_lib_sizes
         type: bool
         default: true
+      - name: offset_prior
+        type: ndarray
+        description: Genes x samples log-scale adjustments to the library sizes, as for cpm().
     returns:
       type: ndarray
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_expression.py
+      - test_edger5_parity.py
     citations:
       - robinson2010edger
 
@@ -1089,9 +1197,10 @@ api:
     returns:
       type: ndarray
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_expression.py
+      - test_edger5_parity.py
     citations:
       - mccarthy2012
 
@@ -1124,9 +1233,10 @@ api:
     returns:
       type: ndarray
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_expression.py
+      - test_edger5_parity.py
 
   - name: rpkm_by_group
     kind: function
@@ -1187,16 +1297,29 @@ api:
         type: ndarray
       - name: min_count
         type: int
-        default: 10
+        default: null
+        description: 10 unless preset says otherwise.
       - name: min_total_count
         type: int
-        default: 15
+        default: null
+        description: 15 unless preset says otherwise.
       - name: large_n
         type: int
-        default: 10
+        default: null
+        description: 10 unless preset says otherwise.
       - name: min_prop
         type: float
-        default: 0.7
+        default: null
+        description: 0.7 unless preset says otherwise.
+      - name: min_sample_size
+        type: float
+        description: Minimum sample size, overriding the one from group or design.
+      - name: max_n_samples
+        type: float
+        description: Cap on the minimum sample size; 40 unless preset says otherwise.
+      - name: preset
+        type: str
+        description: Threshold preset, stringent (the defaults), moderate or lenient; overrides the individual thresholds.
     returns:
       type: ndarray
       description: Boolean array indicating which genes to keep.
@@ -1205,6 +1328,7 @@ api:
     test_files:
       - test_dgelist.py
       - test_r_vs_py.py
+      - test_edger5_parity.py
 
   # -----------------------------------------------------------------
   # Dispersion estimation
@@ -1264,6 +1388,10 @@ api:
         default: 1e-6
       - name: weights
         type: ndarray
+      - name: fast
+        type: [bool, str]
+        default: false
+        description: 'If True, use a faster, more approximate dispersion estimation: disables trend fitting, skips tagwise estimation, reduces the dispersion grid, and raises the minimum row sum filter.'
     returns:
       type: DGEList
     impl_status: complete
@@ -1271,6 +1399,18 @@ api:
     test_files:
       - test_dispersion.py
       - test_r_vs_py.py
+      - test_backward_compat.py
+      - test_dgelist.py
+      - test_edger5_parity.py
+      - test_edger_ql_parity.py
+      - test_exact_test.py
+      - test_expression.py
+      - test_gene_sets.py
+      - test_glm.py
+      - test_splicing.py
+      - test_treat.py
+      - test_utilities.py
+      - test_visualization.py
     citations:
       - chen2014
       - mccarthy2012
@@ -1321,10 +1461,11 @@ api:
     returns:
       type: dict
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_classes.py
       - test_dispersion.py
+      - test_edger_ql_parity.py
     citations:
       - robinson2007
       - chen2014
@@ -1357,9 +1498,12 @@ api:
     returns:
       type: DGEList
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_dispersion.py
+      - test_edger5_parity.py
+      - test_exact_test.py
+      - test_glm.py
     citations:
       - robinson2008
 
@@ -1405,12 +1549,16 @@ api:
       - name: verbose
         type: bool
         default: false
+      - name: ave_log_cpm_vals
+        type: ndarray
+        description: AveLogCPM, computed at the given dispersion if not supplied.
     returns:
       type: DGEList
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_dispersion.py
+      - test_edger5_parity.py
     citations:
       - robinson2007
 
@@ -1444,9 +1592,10 @@ api:
     returns:
       type: DGEList
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_utilities.py
+      - test_edger5_parity.py
 
   - name: estimate_glm_common_disp
     kind: function
@@ -1480,9 +1629,11 @@ api:
     returns:
       type: DGEList
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_dispersion.py
+      - test_edger5_parity.py
+      - test_glm.py
     citations:
       - mccarthy2012
 
@@ -1512,9 +1663,10 @@ api:
     returns:
       type: DGEList
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_dispersion.py
+      - test_edger5_parity.py
     citations:
       - mccarthy2012
 
@@ -1534,12 +1686,32 @@ api:
         type: ndarray
       - name: offset
         type: ndarray
+      - name: dispersion
+        type: [float, ndarray]
+        description: Dispersion to shrink toward when trend is False; defaults to the common dispersion.
+      - name: prior_df
+        type: int
+        default: 10
+        description: Prior degrees of freedom for the weighted likelihood.
+      - name: trend
+        type: bool
+        description: Shrink toward the trended dispersion; defaults to True when a trended dispersion is available.
+      - name: span
+        type: float
+        description: Span for the local weighted likelihood; chosen from the number of genes by default.
+      - name: ave_log_cpm_vals
+        type: ndarray
+        description: Average log-CPM of each gene; computed if not supplied.
+      - name: weights
+        type: ndarray
+        description: Observation weights.
     returns:
       type: DGEList
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_dispersion.py
+      - test_edger5_parity.py
     citations:
       - mccarthy2012
 
@@ -1585,9 +1757,10 @@ api:
     returns:
       type: DGEList
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_dispersion.py
+      - test_edger5_parity.py
     citations:
       - zhou2014
 
@@ -1630,12 +1803,19 @@ api:
     test_files:
       - test_glm.py
       - test_r_vs_py.py
+      - test_edger5_parity.py
+      - test_edger_ql_parity.py
+      - test_exact_test.py
+      - test_expression.py
+      - test_gene_sets.py
+      - test_treat.py
+      - test_utilities.py
     citations:
       - mccarthy2012
 
   - name: sample_weights
     kind: function
-    domain: glm
+    domain: glm_fitting
     module: edgepython.ql_weights
     r_equivalent: sampleWeights
     description: >-
@@ -1648,9 +1828,11 @@ api:
     returns:
       type: ndarray
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_edger5_parity.py
+      - test_backward_compat.py
+      - test_voom_lmfit.py
 
   - name: glm_ql_fit
     kind: function
@@ -1699,10 +1881,18 @@ api:
       type: dict
       description: DGEGLM-like dict with df.prior, var.prior, var.post, etc.
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_glm.py
       - test_dispersion.py
+      - test_backward_compat.py
+      - test_edger5_parity.py
+      - test_edger_ql_parity.py
+      - test_gene_sets.py
+      - test_splicing.py
+      - test_treat.py
+      - test_utilities.py
+      - test_visualization.py
     citations:
       - lun2016
 
@@ -1737,9 +1927,10 @@ api:
     returns:
       type: ndarray
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_glm.py
+      - test_edger5_parity.py
 
   - name: mglm_one_way
     kind: function
@@ -1806,9 +1997,12 @@ api:
       type: dict
       description: DGELRT-like dict with table (logFC, logCPM, LR, PValue).
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_glm.py
+      - test_edger5_parity.py
+      - test_exact_test.py
+      - test_expression.py
     citations:
       - mccarthy2012
 
@@ -1819,7 +2013,8 @@ api:
     r_equivalent: glmQLFTest
     description: >-
       Conduct genewise quasi-likelihood F-tests for one or more GLM
-      coefficients.
+      coefficients, optionally against a fold-change threshold (TREAT or
+      UPSHOT, as in edgeR 5.0).
     params:
       - name: glmfit
         type: dict
@@ -1832,13 +2027,30 @@ api:
       - name: poisson_bound
         type: bool
         default: true
+      - name: fc
+        type: float
+        default: 1.0
+        description: Fold-change threshold; ignored if lfc is given.
+      - name: lfc
+        type: [float, ndarray]
+        description: log2 fold-change threshold(s), one per tested coefficient or a single value for all.
+      - name: upshot
+        type: bool
+        default: true
+        description: With a threshold, use UPSHOT rather than plain TREAT.
     returns:
       type: dict
       description: DGELRT-like dict with table (logFC, logCPM, F, PValue).
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_glm.py
+      - test_backward_compat.py
+      - test_dispersion.py
+      - test_edger5_parity.py
+      - test_edger_ql_parity.py
+      - test_utilities.py
+      - test_visualization.py
     citations:
       - lun2016
 
@@ -1866,6 +2078,10 @@ api:
         type: str
         default: interval
         vocabulary: treat_null
+      - name: legacy
+        type: bool
+        default: false
+        description: Use edgeR 4's statistics.
     returns:
       type: dict
     impl_status: complete
@@ -1873,6 +2089,7 @@ api:
     test_files:
       - test_treat.py
       - test_r_vs_py.py
+      - test_edger5_parity.py
     citations:
       - mccarthy2012
 
@@ -1915,6 +2132,8 @@ api:
     test_status: tested
     test_files:
       - test_exact_test.py
+      - test_dispersion.py
+      - test_visualization.py
     citations:
       - robinson2008
 
@@ -2065,11 +2284,14 @@ api:
       type: dict
       description: TopTags-like dict with table DataFrame.
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_glm.py
       - test_treat.py
       - test_exact_test.py
+      - test_dispersion.py
+      - test_edger5_parity.py
+      - test_sc_fit.py
 
   - name: decide_tests
     kind: function
@@ -2097,10 +2319,11 @@ api:
       type: ndarray
       description: Integer array with values in {-1, 0, 1}.
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_treat.py
       - test_utilities.py
+      - test_edger5_parity.py
 
   # -----------------------------------------------------------------
   # I/O
@@ -2129,10 +2352,26 @@ api:
       - name: format
         type: str
         description: For kallisto, 'h5' or 'tsv'.
+      - name: path
+        type: str
+        description: Base path prefix for relative file paths.
       - name: group
         type: list
       - name: labels
         type: list
+      - name: columns
+        type: tuple
+        description: 'For table format: (gene_id_col, count_col) as 0-based indices.'
+      - name: sep
+        type: str
+        default: "\t"
+        description: Field separator for table/CSV files.
+      - name: obs_col
+        type: str
+        description: 'For AnnData: column in .obs to use as group factor.'
+      - name: layer
+        type: str
+        description: 'For AnnData: layer name to use instead of .X.'
       - name: ngibbs
         type: int
         default: 100
@@ -2140,13 +2379,18 @@ api:
         type: bool
         description: Divide quantifier counts by the overdispersions.
         default: false
+      - name: verbose
+        type: bool
+        default: true
+        description: Print progress messages.
     returns:
       type: DGEList
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_io.py
       - test_edger5_parity.py
+      - test_backward_compat.py
 
   - name: dgelist_from_tximport
     kind: function
@@ -2178,7 +2422,7 @@ api:
     returns:
       type: DGEList
     impl_status: complete
-    test_status: tested
+    test_status: tested_r_comparison
     test_files:
       - test_edger5_parity.py
 
@@ -2208,7 +2452,7 @@ api:
     returns:
       type: DGEList
     impl_status: complete
-    test_status: tested
+    test_status: tested_r_comparison
     test_files:
       - test_edger5_parity.py
 
@@ -2322,12 +2566,16 @@ api:
       - name: verbose
         type: bool
         default: true
+      - name: paths
+        type: list
+        description: Sample directories, as in edgePython 0.2.6's catch_salmon(paths); kept for compatibility.
     returns:
       type: [DGEList, dict]
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_edger5_parity.py
+      - test_backward_compat.py
     citations:
       - baldoni2024a
       - baldoni2024b
@@ -2366,16 +2614,16 @@ api:
       - name: offset_prior
         type: bool
         default: true
-      - name: verbose
-        type: bool
-        default: true
       - name: gene_length
         type: str
         default: moderate
+      - name: verbose
+        type: bool
+        default: true
     returns:
       type: [DGEList, dict]
     impl_status: complete
-    test_status: tested
+    test_status: tested_r_comparison
     test_files:
       - test_edger5_parity.py
     citations:
@@ -2412,12 +2660,16 @@ api:
       - name: verbose
         type: bool
         default: true
+      - name: paths
+        type: list
+        description: Sample directories, as in edgePython 0.2.6's catch_kallisto(paths); kept for compatibility.
     returns:
       type: [DGEList, dict]
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_edger5_parity.py
+      - test_backward_compat.py
     citations:
       - baldoni2024a
 
@@ -2454,16 +2706,16 @@ api:
       - name: offset_prior
         type: bool
         default: true
-      - name: verbose
-        type: bool
-        default: true
       - name: gene_length
         type: str
         default: moderate
+      - name: verbose
+        type: bool
+        default: true
     returns:
       type: [DGEList, dict]
     impl_status: complete
-    test_status: tested
+    test_status: tested_r_comparison
     test_files:
       - test_edger5_parity.py
     citations:
@@ -2504,7 +2756,7 @@ api:
     returns:
       type: [DGEList, dict]
     impl_status: complete
-    test_status: tested
+    test_status: tested_r_comparison
     test_files:
       - test_edger5_parity.py
     citations:
@@ -2543,16 +2795,16 @@ api:
       - name: offset_prior
         type: bool
         default: true
-      - name: verbose
-        type: bool
-        default: true
       - name: gene_length
         type: str
         default: moderate
+      - name: verbose
+        type: bool
+        default: true
     returns:
       type: [DGEList, dict]
     impl_status: complete
-    test_status: tested
+    test_status: tested_r_comparison
     test_files:
       - test_edger5_parity.py
     citations:
@@ -2585,7 +2837,7 @@ api:
     returns:
       type: [DGEList, dict]
     impl_status: complete
-    test_status: tested
+    test_status: tested_r_comparison
     test_files:
       - test_edger5_parity.py
     citations:
@@ -2623,7 +2875,7 @@ api:
     returns:
       type: [DGEList, dict]
     impl_status: complete
-    test_status: tested
+    test_status: tested_r_comparison
     test_files:
       - test_edger5_parity.py
     citations:
@@ -2662,9 +2914,10 @@ api:
     returns:
       type: [DGEList, dict]
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_edger5_parity.py
+      - test_backward_compat.py
     citations:
       - baldoni2024a
 
@@ -2704,7 +2957,7 @@ api:
     returns:
       type: [DGEList, dict]
     impl_status: complete
-    test_status: tested
+    test_status: tested_r_comparison
     test_files:
       - test_edger5_parity.py
     citations:
@@ -2728,7 +2981,7 @@ api:
     returns:
       type: [DGEList, dict]
     impl_status: complete
-    test_status: tested
+    test_status: tested_r_comparison
     test_files:
       - test_edger5_parity.py
 
@@ -2748,7 +3001,7 @@ api:
     returns:
       type: [DGEList, dict]
     impl_status: complete
-    test_status: tested
+    test_status: tested_r_comparison
     test_files:
       - test_edger5_parity.py
 
@@ -2779,7 +3032,7 @@ api:
     returns:
       type: PCList
     impl_status: complete
-    test_status: tested
+    test_status: tested_r_comparison
     test_files:
       - test_edger5_parity.py
 
@@ -2804,7 +3057,7 @@ api:
     returns:
       type: PCList
     impl_status: complete
-    test_status: tested
+    test_status: tested_r_comparison
     test_files:
       - test_edger5_parity.py
 
@@ -2825,7 +3078,7 @@ api:
     returns:
       type: PCList
     impl_status: complete
-    test_status: tested
+    test_status: tested_r_comparison
     test_files:
       - test_edger5_parity.py
 
@@ -2859,7 +3112,7 @@ api:
     returns:
       type: DGEBIN
     impl_status: complete
-    test_status: tested
+    test_status: tested_r_comparison
     test_files:
       - test_edger5_parity.py
 
@@ -2905,7 +3158,7 @@ api:
     returns:
       type: DGEBIN
     impl_status: complete
-    test_status: tested
+    test_status: tested_r_comparison
     test_files:
       - test_edger5_parity.py
 
@@ -2939,7 +3192,7 @@ api:
     returns:
       type: DGELRT
     impl_status: complete
-    test_status: tested
+    test_status: tested_r_comparison
     test_files:
       - test_edger5_parity.py
 
@@ -2969,10 +3222,18 @@ api:
       - name: weights
         type: ndarray
         default: null
+      - name: maxit
+        type: int
+        default: 50
+        description: Maximum number of iterations.
+      - name: tol
+        type: float
+        default: 1.0e-08
+        description: Convergence tolerance.
     returns:
       type: dict
     impl_status: complete
-    test_status: tested
+    test_status: tested_r_comparison
     test_files:
       - test_edger5_parity.py
 
@@ -3000,10 +3261,18 @@ api:
       - name: weights
         type: ndarray
         default: null
+      - name: maxit
+        type: int
+        default: 100
+        description: Maximum number of iterations.
+      - name: tol
+        type: float
+        default: 1.0e-06
+        description: Convergence tolerance.
     returns:
       type: dict
     impl_status: complete
-    test_status: tested
+    test_status: tested_r_comparison
     test_files:
       - test_edger5_parity.py
 
@@ -3053,25 +3322,29 @@ api:
     kind: function
     domain: io
     module: edgepython.io
-    r_equivalent: null
+    r_equivalent: Seurat2PB
     description: >-
-      Convert a Seurat/AnnData single-cell object to pseudobulk DGEList
-      by summing counts within cell-type and sample groups.
+      Convert single-cell data (AnnData, a dict of counts and obs, or a
+      count matrix) to a pseudo-bulk DGEList by summing the counts of
+      cells sharing a sample and cluster.
     params:
-      - name: adata
-        type: AnnData
+      - name: object
+        type: [AnnData, dict, ndarray]
         required: true
-      - name: cell_type_col
-        type: str
+        description: 'Single-cell data: an AnnData, a dict with counts (genes x cells) and obs, or a genes x cells count matrix.'
+      - name: sample
+        type: [str, ndarray]
         required: true
-      - name: sample_col
-        type: str
-        required: true
-      - name: layer
-        type: str
+        description: Column of obs giving each cell's sample, or per-cell sample labels.
+      - name: cluster
+        type: [str, ndarray]
+        default: cluster
+        description: Column of obs giving each cell's cluster, or per-cell cluster labels.
     returns:
-      type: dict
-      description: Dict mapping cell types to DGEList objects.
+      type: DGEList
+      description: >-
+        One column per sample-cluster combination, with sample and cluster
+        columns in samples.
     impl_status: complete
     test_status: untested
 
@@ -3109,13 +3382,17 @@ api:
         type: list
       - name: hl_col
         type: list
+      - name: kwargs
+        type: dict
+        description: Further keyword arguments passed to matplotlib.
     returns:
       type: tuple
       description: (matplotlib.Figure, matplotlib.Axes)
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_visualization.py
+      - test_edger5_parity.py
 
   - name: plot_bcv
     kind: function
@@ -3145,6 +3422,9 @@ api:
       - name: col_tagwise
         type: str
         default: black
+      - name: kwargs
+        type: dict
+        description: Further keyword arguments passed to matplotlib.
     returns:
       type: tuple
     impl_status: complete
@@ -3185,12 +3465,16 @@ api:
         type: str
       - name: main
         type: str
+      - name: kwargs
+        type: dict
+        description: Further keyword arguments passed to matplotlib.
     returns:
       type: tuple
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_visualization.py
+      - test_edger5_parity.py
 
   - name: plot_smear
     kind: function
@@ -3219,6 +3503,9 @@ api:
       - name: lowess
         type: bool
         default: false
+      - name: kwargs
+        type: dict
+        description: Further keyword arguments passed to matplotlib.
     returns:
       type: tuple
     impl_status: complete
@@ -3254,6 +3541,9 @@ api:
       - name: col_raw
         type: str
         default: black
+      - name: kwargs
+        type: dict
+        description: Further keyword arguments passed to matplotlib.
     returns:
       type: tuple
     impl_status: complete
@@ -3290,6 +3580,9 @@ api:
         default: M
       - name: main
         type: str
+      - name: kwargs
+        type: dict
+        description: Further keyword arguments passed to matplotlib.
     returns:
       type: tuple
     impl_status: complete
@@ -3321,6 +3614,9 @@ api:
         default: true
       - name: main
         type: str
+      - name: kwargs
+        type: dict
+        description: Further keyword arguments passed to matplotlib.
     returns:
       type: dict
     impl_status: complete
@@ -3379,6 +3675,23 @@ api:
       - name: "y"
         type: DGEList
         required: true
+      - name: geneid
+        type: [ndarray, str]
+        description: Gene ID of each exon or transcript, or a column of y['genes'].
+      - name: exonid
+        type: [ndarray, str]
+        description: Exon or transcript IDs, or a column of y['genes'].
+      - name: group
+        type: ndarray
+        description: Group factor.
+      - name: dispersion
+        type: [str, float, ndarray]
+        default: auto
+        description: Dispersion; 'auto' uses the dispersions stored in y.
+      - name: prior_count
+        type: float
+        default: 0.125
+        description: Prior count added before computing log-fold-changes.
     returns:
       type: dict
     impl_status: complete
@@ -3398,6 +3711,13 @@ api:
       - name: "y"
         type: [DGEList, ndarray]
         required: true
+      - name: geneids
+        type: ndarray
+        required: true
+        description: Gene IDs for each exon.
+      - name: dispersion
+        type: [float, ndarray]
+        description: Dispersion values.
     returns:
       type: DataFrame
     impl_status: complete
@@ -3439,9 +3759,18 @@ api:
         default: false
       - name: inter_gene_cor
         type: float
+        default: 0.01
       - name: sort
         type: bool
         default: true
+      - name: trend_var
+        type: bool
+        default: false
+        description: Use a mean-variance trend when squeezing the variances.
+      - name: directional
+        type: bool
+        default: true
+        description: If False, test for any change regardless of direction (implies use_ranks).
     returns:
       type: DataFrame
     impl_status: complete
@@ -3449,6 +3778,8 @@ api:
     test_files:
       - test_gene_sets.py
       - test_r_vs_py.py
+      - test_backward_compat.py
+      - test_edger5_parity.py
     citations:
       - chen2016
 
@@ -3471,13 +3802,41 @@ api:
         type: ndarray
       - name: contrast
         type: [int, ndarray]
-      - name: weights
-        type: ndarray
       - name: sort
         type: str
         default: directional
+      - name: geneid
+        type: ndarray
+        description: Gene IDs used to match character gene sets.
+      - name: gene_weights
+        type: ndarray
+        description: Weights applied to the genes of every unweighted set.
       - name: standardize
         type: str
+        default: posterior.sd
+      - name: array_weights
+        type: ndarray
+        description: Array weights, or observation weights (G x n; defaults to y['weights'] for an EList).
+      - name: weights
+        type: ndarray
+      - name: block
+        type: ndarray
+        description: Blocks of correlated samples; needs correlation.
+      - name: correlation
+        type: float
+        description: Intra-block correlation.
+      - name: trend_var
+        type: bool
+        default: false
+        description: Use a mean-variance trend for the prior variance.
+      - name: robust
+        type: bool
+        default: false
+        description: Robust empirical Bayes estimation of the prior variance.
+      - name: winsor_tail_p
+        type: tuple
+        default: [0.05, 0.1]
+        description: Winsorization tail proportions when robust.
     returns:
       type: DataFrame
     impl_status: complete
@@ -3485,6 +3844,8 @@ api:
     test_files:
       - test_gene_sets.py
       - test_r_vs_py.py
+      - test_backward_compat.py
+      - test_edger5_parity.py
     citations:
       - chen2016
 
@@ -3509,8 +3870,14 @@ api:
       - name: nrot
         type: int
         default: 999
-      - name: weights
-        type: ndarray
+      - name: set_statistic
+        type: str
+        default: mean
+        description: 'Set statistic: mean (default), floormean or mean50.'
+      - name: sort
+        type: bool
+        default: true
+        description: Sort results by p-value.
     returns:
       type: DataFrame
     impl_status: complete
@@ -3542,8 +3909,22 @@ api:
       - name: nrot
         type: int
         default: 999
-      - name: weights
-        type: ndarray
+      - name: set_statistic
+        type: str
+        default: mean
+        description: 'Set statistic: mean (default), floormean or mean50.'
+      - name: adjust_method
+        type: str
+        default: BH
+        description: P-value adjustment method (default 'BH').
+      - name: midp
+        type: bool
+        default: true
+        description: Use mid-p adjustment (default True).
+      - name: sort
+        type: bool
+        default: true
+        description: Sort results by p-value.
     returns:
       type: DataFrame
     impl_status: complete
@@ -3574,7 +3955,7 @@ api:
         type: [int, ndarray]
       - name: nrot
         type: int
-        default: 999
+        default: 9999
     returns:
       type: DataFrame
     impl_status: complete
@@ -3597,6 +3978,13 @@ api:
       - name: de
         type: [dict, list]
         description: DE results object or gene list.
+      - name: species
+        type: str
+        default: Hs
+        description: Species code.
+      - name: kwargs
+        type: dict
+        description: Additional arguments passed to GProfiler.profile().
     returns:
       type: DataFrame
     impl_status: delegate
@@ -3620,6 +4008,13 @@ api:
       - name: de
         type: [dict, list]
         description: DE results object or gene list.
+      - name: species
+        type: str
+        default: Hs
+        description: Species code.
+      - name: kwargs
+        type: dict
+        description: Additional arguments passed to GProfiler.profile().
     returns:
       type: DataFrame
     impl_status: delegate
@@ -3651,7 +4046,10 @@ api:
     returns:
       type: ndarray
     impl_status: complete
-    test_status: untested
+    test_status: tested
+    test_files:
+      - test_dispersion.py
+      - test_glm.py
     dependencies:
       - patsy
 
@@ -3700,7 +4098,7 @@ api:
     returns:
       type: DataFrame
     impl_status: complete
-    test_status: tested
+    test_status: tested_r_comparison
     test_files:
       - test_bismark.py
     dependencies:
@@ -3729,9 +4127,10 @@ api:
     returns:
       type: tuple
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_utilities.py
+      - test_edger5_parity.py
 
   - name: pred_fc
     kind: function
@@ -3760,10 +4159,11 @@ api:
     returns:
       type: ndarray
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_expression.py
       - test_utilities.py
+      - test_edger5_parity.py
 
   - name: good_turing
     kind: function
@@ -3910,9 +4310,11 @@ api:
     returns:
       type: dict
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_utilities.py
+      - test_edger5_parity.py
+      - test_edger_ql_parity.py
     citations:
       - lun2016
 
@@ -3945,7 +4347,7 @@ api:
         default: 0.5
       - name: adaptive_span
         type: bool
-        default: false
+        default: true
       - name: block
         type: ndarray
       - name: correlation
@@ -3971,6 +4373,15 @@ api:
       - name: keep_elist
         type: bool
         default: true
+      - name: offset
+        type: ndarray
+        description: Genes x samples log-scale offsets, converted to offset_prior by centring each gene.
+      - name: offset_prior
+        type: ndarray
+        description: Genes x samples log-scale adjustments; the library sizes are exp(log(lib_size) + offset_prior).
+      - name: weights
+        type: ndarray
+        description: Prior observation weights, used in the linear model fit only; synonym for prior_weights.
     returns:
       type: dict
     impl_status: complete
@@ -3978,6 +4389,8 @@ api:
     test_files:
       - test_voom_lmfit.py
       - test_voom_r_parity.py
+      - test_backward_compat.py
+      - test_edger5_parity.py
     citations:
       - law2014
 
@@ -4019,13 +4432,19 @@ api:
         default: 0.5
       - name: adaptive_span
         type: bool
-        default: false
+        default: true
       - name: save_plot
         type: bool
         default: false
       - name: keep_elist
         type: bool
         default: true
+      - name: offset
+        type: ndarray
+        description: Genes x samples log-scale offsets, converted to offset_prior by centring each gene.
+      - name: offset_prior
+        type: ndarray
+        description: Genes x samples log-scale adjustments; the library sizes are exp(log(lib_size) + offset_prior).
     returns:
       type: dict
     impl_status: complete
@@ -4033,6 +4452,8 @@ api:
     test_files:
       - test_voom_lmfit.py
       - test_voom_r_parity.py
+      - test_backward_compat.py
+      - test_edger5_parity.py
     citations:
       - law2014
 
@@ -4068,9 +4489,10 @@ api:
     returns:
       type: dict
     impl_status: complete
-    test_status: tested
+    test_status: tested_both
     test_files:
       - test_voom_lmfit.py
+      - test_voom_r_parity.py
     citations:
       - law2014
 
@@ -4114,6 +4536,7 @@ api:
     test_files:
       - test_voom_lmfit.py
       - test_voom_r_parity.py
+      - test_edger5_parity.py
 
   - name: duplicate_correlation
     kind: function
@@ -4145,6 +4568,7 @@ api:
     test_files:
       - test_voom_lmfit.py
       - test_voom_r_parity.py
+      - test_edger5_parity.py
 
   # -----------------------------------------------------------------
   # Single-cell mixed model (NEBULA-LN)
@@ -4202,12 +4626,12 @@ api:
         default: nebula
       - name: min_bounds
         type: tuple
-        description: Lower bounds for (sigma_param, phi).
-        default: [0.0001, 0.0001]
+        description: Lower bounds for (sigma_param, phi); (1e-4, 1e-4) if not given.
+        default: null
       - name: max_bounds
         type: tuple
-        description: Upper bounds for (sigma_param, phi).
-        default: [10.0, 1000.0]
+        description: Upper bounds for (sigma_param, phi); (10, 1000) if not given.
+        default: null
       - name: cpc
         type: float
         description: Minimum mean counts per cell for gene filtering.
@@ -4254,6 +4678,45 @@ api:
     dependencies:
       - numba
       - scipy
+
+  - name: shrink_sc_disp
+    kind: function
+    domain: single_cell
+    module: edgepython.sc_fit
+    r_equivalent: null
+    description: >-
+      Empirical Bayes shrinkage of the cell-level negative binomial
+      dispersions from glm_sc_fit toward a trended prior, using limma's
+      squeezeVar.
+    params:
+      - name: fit
+        type: dict
+        required: true
+        description: Output from glm_sc_fit().
+      - name: counts
+        type: ndarray
+        description: >-
+          Genes x cells counts, used for the abundance covariate of the
+          trended prior; fit['ave_log_abundance'] is used if not given.
+      - name: covariate
+        type: ndarray
+        description: Custom covariate for the trended prior.
+      - name: robust
+        type: bool
+        default: true
+        description: Robust estimation, protecting against outlier genes.
+    returns:
+      type: dict
+      description: >-
+        The fit, updated in place with phi_raw, phi_post, phi_prior,
+        df_residual, df_prior_phi and dispersion_shrunk.
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_sc_fit.py
+      - test_sc_eb_sim.py
+    citations:
+      - he2021
 
   - name: glm_sc_test
     kind: function
@@ -4395,6 +4858,40 @@ relationships:
         top_tags can be called directly on glm_sc_fit results with
         coef parameter to perform Wald testing.
 
+    - from: glm_sc_fit
+      to: shrink_sc_disp
+      relation: precedes
+      description: Dispersion shrinkage uses the fitted SC model.
+
+    - from: catch_salmon
+      to: filter_by_expr
+      relation: precedes
+      description: >-
+        Transcript counts from the catch_* readers, divided by their
+        overdispersions, go through the usual pipeline.
+
+    - from: glm_ql_fit
+      to: sample_weights
+      relation: precedes
+      description: >-
+        Sample weights are estimated from a QL fit and passed back to
+        glm_ql_fit as weights.
+
+    - from: read_bismark2pc
+      to: bin_ql_fit
+      relation: precedes
+      description: Fit quasi-binomial GLMs to the paired counts.
+
+    - from: bin_ql_fit
+      to: bin_ql_ftest
+      relation: precedes
+      description: Quasi-binomial F-tests require a binomial QL fit.
+
+    - from: bin_ql_ftest
+      to: top_tags
+      relation: precedes
+      description: Extract top features from binomial test results.
+
   # Functional alternatives (functions that serve the same purpose)
   alternatives:
     - functions: [glm_lrt, glm_ql_ftest]
@@ -4473,6 +4970,14 @@ relationships:
       requires: dict
       description: Requires a fitted model from glm_sc_fit.
 
+    - function: bin_ql_ftest
+      requires: DGEBIN
+      description: Requires a binomial QL fit from bin_ql_fit.
+
+    - function: sample_weights
+      requires: [DGEGLM, DGEBIN]
+      description: Requires a fit from glm_ql_fit (legacy=False), bin_fit or bin_ql_fit.
+
   # Functions that share internal implementation
   delegates_to:
     - from: estimate_disp
@@ -4497,11 +5002,11 @@ relationships:
 
 testing:
   framework: pytest
-  total_tests: 346
+  total_tests: 620
   test_directory: tests/
   conftest: tests/conftest.py
   data_directory: tests/data/
-  data_files: 115
+  data_files: 194
 
   test_files:
     - file: test_bismark.py
@@ -4520,7 +5025,7 @@ testing:
       includes_r_comparison: false
 
     - file: test_dispersion.py
-      tests: 26
+      tests: 27
       domains: [dispersion]
       includes_r_comparison: false
 
@@ -4540,17 +5045,17 @@ testing:
       includes_r_comparison: false
 
     - file: test_glm.py
-      tests: 36
+      tests: 37
       domains: [glm_fitting, glm_testing]
       includes_r_comparison: false
 
     - file: test_io.py
-      tests: 7
+      tests: 6
       domains: [io]
       includes_r_comparison: false
 
     - file: test_r_vs_py.py
-      tests: 73
+      tests: 87
       domains: [normalization, dgelist, glm_testing, gene_sets]
       includes_r_comparison: true
 
@@ -4565,7 +5070,7 @@ testing:
       includes_r_comparison: false
 
     - file: test_utilities.py
-      tests: 26
+      tests: 28
       domains: [utilities, limma]
       includes_r_comparison: false
 
@@ -4575,19 +5080,51 @@ testing:
       includes_r_comparison: false
 
     - file: test_sc_fit.py
-      tests: 41
+      tests: 53
       domains: [single_cell]
       includes_r_comparison: false
 
+    - file: test_edger5_parity.py
+      tests: 185
+      domains: [normalization, filtering, dispersion, glm_fitting, glm_testing, io, binomial, gene_sets, limma]
+      includes_r_comparison: true
+
+    - file: test_edger_ql_parity.py
+      tests: 13
+      domains: [glm_fitting, glm_testing]
+      includes_r_comparison: true
+
+    - file: test_backward_compat.py
+      tests: 5
+      domains: [io, glm_fitting, glm_testing, gene_sets, limma]
+      includes_r_comparison: false
+
+    - file: test_voom_lmfit.py
+      tests: 7
+      domains: [limma]
+      includes_r_comparison: false
+
+    - file: test_voom_r_parity.py
+      tests: 1
+      domains: [limma]
+      includes_r_comparison: true
+
+    - file: test_sc_eb_sim.py
+      tests: 1
+      domains: [single_cell]
+      includes_r_comparison: false
+
+    - file: test_mcp_server.py
+      tests: 6
+      domains: [io, glm_testing, splicing, gene_sets, binomial, single_cell]
+      includes_r_comparison: false
+      notes: Tests the MCP server (MCP/edgepython_server.py); skipped unless fastmcp is installed.
+
   untested_functions:
+    - get_dispersion_type
     - normalize_chip_to_input
     - calc_norm_offsets_for_chip
-    - get_dispersion_type
     - to_anndata
     - read_10x
-    - catch_salmon
-    - catch_kallisto
-    - catch_rsem
     - feature_counts_to_dgelist
     - seurat_to_pb
-    - model_matrix
