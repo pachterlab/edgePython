@@ -451,45 +451,15 @@ def knbinomdevc_2(mu, phi):
 def compute_weight(u, phi, prior):
     """Compute QL weights for adjusted deviance and degrees of freedom.
 
-    Port of ql_weights.c compute_weight().
+    Port of edgeR 5.0's compute_weight_negbin(): Chebyshev approximations,
+    with the dispersion capped at 4 for the second one. (edgeR 4 instead
+    summed the NB distribution for dispersions above 4.)
     """
     mu = u / prior
-
     if phi < 0.736:
         return anbinomdevc_1(mu, phi), knbinomdevc_1(mu, phi)
-    elif phi < 4.001:
-        return anbinomdevc_2(mu, phi), knbinomdevc_2(mu, phi)
-    else:
-        if mu < LOW_BOUND:
-            return 0.0, 0.0
-        else:
-            n = int(mu * mu * phi + 10)
-            if n > 50:
-                n = 50
-            size = 1.0 / phi
-
-            # Compute probabilities and deviances using manual lgamma
-            p = size / (mu + size)
-            log_p = math.log(p)
-            log_1mp = math.log(1.0 - p)
-            lgamma_size = math.lgamma(size)
-
-            pr = np.empty(n)
-            de = np.empty(n)
-            for i in range(n):
-                logpmf = (math.lgamma(i + size) - math.lgamma(i + 1.0)
-                          - lgamma_size + size * log_p + i * log_1mp)
-                pr[i] = math.exp(logpmf)
-                if i == 0:
-                    de[i] = 2.0 * (-size * log_p)
-                else:
-                    de[i] = 2.0 * (i * math.log(i / mu) - (i + size) * math.log((i + size) / (mu + size)))
-
-            dd = np.sum(pr * de)
-            out = np.sum(pr * (de - dd) ** 2)
-            alpha = 2.0 * dd / out
-            kappa = 2.0 * dd * dd / out
-            return alpha, kappa
+    phi = min(phi, 4.0)
+    return anbinomdevc_2(mu, phi), knbinomdevc_2(mu, phi)
 
 
 # ---------------------------------------------------------------------------
@@ -529,33 +499,51 @@ def compute_unit_nb_deviance(y, mu, phi):
 # Hat values via QR decomposition
 # ---------------------------------------------------------------------------
 
-def qr_hat(X):
-    """Compute hat values (leverages) from a design matrix.
-
-    Port of ql_glm.c qr_hat(), using numpy QR.
-
-    Parameters
-    ----------
-    X : ndarray, shape (n, p)
-        Weighted design matrix (sqrt(W) * X).
-
-    Returns
-    -------
-    ndarray, shape (n,)
-        Hat values (diagonal of the hat matrix).
-    """
-    Q, R = np.linalg.qr(X, mode='reduced')
-    diag_R = np.abs(np.diag(R))
-    if diag_R.size > 0 and diag_R.max() > 0:
-        rank = int(np.sum(diag_R > 1e-7 * diag_R.max()))
-    else:
-        rank = 0
-    return np.sum(Q[:, :rank] ** 2, axis=1)
-
-
 # ---------------------------------------------------------------------------
 # compute_adjust_vec: adjusted deviance and df for each gene
 # ---------------------------------------------------------------------------
+
+@njit(cache=True)
+def _hat_values(design, zwpt):
+    """Leverages of the weighted design, as edgeR's qr_hat computes them.
+
+    edgeR factors diag(zwpt) @ design with LINPACK's dqrdc2, which sets
+    aside a column whose norm, after removing the columns kept before it,
+    is below 1e-7 times its original norm. The leverages are the squared
+    row sums of an orthonormal basis for the kept columns, found here by
+    Gram-Schmidt with reorthogonalization.
+    """
+    nlib, ncoef = design.shape
+    basis = np.zeros((nlib, ncoef))
+    v = np.empty(nlib)
+    k = 0
+    for c in range(ncoef):
+        orig = 0.0
+        for j in range(nlib):
+            v[j] = design[j, c] * zwpt[j]
+            orig += v[j] * v[j]
+        orig = math.sqrt(orig)
+        for _ in range(2):
+            for q in range(k):
+                dot = 0.0
+                for j in range(nlib):
+                    dot += basis[j, q] * v[j]
+                for j in range(nlib):
+                    v[j] -= dot * basis[j, q]
+        nv = 0.0
+        for j in range(nlib):
+            nv += v[j] * v[j]
+        nv = math.sqrt(nv)
+        if orig > 0.0 and nv >= 1e-7 * orig and k < nlib:
+            for j in range(nlib):
+                basis[j, k] = v[j] / nv
+            k += 1
+    hat = np.zeros(nlib)
+    for j in range(nlib):
+        for q in range(k):
+            hat[j] += basis[j, q] * basis[j, q]
+    return hat
+
 
 @njit(cache=True, parallel=True)
 def _compute_adjust_inner(y, mu, design, disp_mat, w_mat, prior,
@@ -563,7 +551,6 @@ def _compute_adjust_inner(y, mu, design, disp_mat, w_mat, prior,
     """Numba-compiled inner loop for compute_adjust_vec."""
     ntag = y.shape[0]
     nlib = y.shape[1]
-    ncoef = design.shape[1]
 
     for tag in prange(ntag):
         yrow = y[tag]
@@ -571,35 +558,12 @@ def _compute_adjust_inner(y, mu, design, disp_mat, w_mat, prior,
         drow = disp_mat[tag]
         wrow = w_mat[tag]
 
-        # Working weights for hat matrix: sqrt(mu / (1 + mu*disp*w/prior))
+        # Working weights for the hat matrix, as in edgeR 5.0's ql_tag_hat:
+        # sqrt(mu * w / (1 + mu * disp / prior))
         zwpt = np.empty(nlib)
         for j in range(nlib):
-            zwpt[j] = math.sqrt(urow[j] / (1.0 + urow[j] * drow[j] * wrow[j] / prior))
-
-        # Weighted design matrix
-        Xw = np.empty((nlib, ncoef))
-        for j in range(nlib):
-            for k in range(ncoef):
-                Xw[j, k] = design[j, k] * zwpt[j]
-
-        # Hat values via (Xw @ inv(Xw'Xw) @ Xw')
-        XtX = Xw.T @ Xw
-        # Small regularization to avoid singular matrix for zero-count genes
-        diag_max = 0.0
-        for k in range(ncoef):
-            if XtX[k, k] > diag_max:
-                diag_max = XtX[k, k]
-        eps = 1e-10 * diag_max if diag_max > 0 else 1e-15
-        for k in range(ncoef):
-            XtX[k, k] += eps
-        XtXinv = np.linalg.inv(XtX)
-        P = Xw @ XtXinv
-        hvals = np.empty(nlib)
-        for j in range(nlib):
-            h = 0.0
-            for k in range(ncoef):
-                h += P[j, k] * Xw[j, k]
-            hvals[j] = h
+            zwpt[j] = math.sqrt(urow[j] * wrow[j] / (1.0 + urow[j] * drow[j] / prior))
+        hvals = _hat_values(design, zwpt)
 
         # Compute adjusted deviance and df for each sample
         dev_tag = 0.0
@@ -659,6 +623,87 @@ def compute_adjust_vec(y, mu, design, dispersion, prior, weights=None):
     return {'df': df_out, 'deviance': dev_out, 's2': s2_out}
 
 
+@njit(cache=True, parallel=True)
+def _compute_adjust_mat_inner(y, mu, design, disp_mat, w_mat, prior, dev_out, df_out):
+    """Numba-compiled inner loop for compute_adjust_mat."""
+    ntag = y.shape[0]
+    nlib = y.shape[1]
+
+    for tag in prange(ntag):
+        urow = mu[tag]
+        drow = disp_mat[tag]
+        wrow = w_mat[tag]
+        zwpt = np.empty(nlib)
+        for j in range(nlib):
+            zwpt[j] = math.sqrt(urow[j] * wrow[j] / (1.0 + urow[j] * drow[j] / prior))
+        hvals = _hat_values(design, zwpt)
+        for lib in range(nlib):
+            alpha, kappa = compute_weight(urow[lib], drow[lib], prior / wrow[lib])
+            udp = compute_unit_nb_deviance(y[tag, lib], urow[lib], drow[lib] * wrow[lib] / prior)
+            hdp = 1.0 - hvals[lib]
+            if hdp < THRESHOLD_ZERO:
+                udp = 0.0
+                hdp = 0.0
+            dev_out[tag, lib] = udp * alpha
+            df_out[tag, lib] = hdp * kappa
+
+
+def _as_tag_lib_matrix(x, ntag, nlib, default):
+    """Dispersions or weights as a genes x samples matrix."""
+    if x is None:
+        return np.full((ntag, nlib), default)
+    x = np.asarray(x, dtype=np.float64)
+    if x.size == 1:
+        return np.full((ntag, nlib), float(x.ravel()[0]))
+    if x.ndim == 1 and len(x) == ntag:
+        return np.repeat(x[:, None], nlib, axis=1)
+    return np.ascontiguousarray(np.broadcast_to(x, (ntag, nlib)), dtype=np.float64)
+
+
+def compute_adjust_mat(y, mu, design, dispersion, prior, weights=None):
+    """Adjusted unit deviances and unit df for every gene and sample.
+
+    Port of edgeR 5.0's compute_adjust_mat() (ql_glm.c), the per-observation
+    version of compute_adjust_vec(). Returns dict with 'unit_deviance' and
+    'unit_df' (genes x samples).
+    """
+    y = np.asarray(y, dtype=np.float64)
+    ntag, nlib = y.shape
+    disp_mat = _as_tag_lib_matrix(dispersion, ntag, nlib, 0.0)
+    w_mat = _as_tag_lib_matrix(weights, ntag, nlib, 1.0)
+    dev_out = np.zeros((ntag, nlib))
+    df_out = np.zeros((ntag, nlib))
+    _compute_adjust_mat_inner(y, np.asarray(mu, dtype=np.float64),
+                              np.asarray(design, dtype=np.float64), disp_mat, w_mat,
+                              float(prior), dev_out, df_out)
+    return {'unit_deviance': dev_out, 'unit_df': df_out}
+
+
+def sample_weights(glmfit):
+    """Empirical sample (quality) weights from adjusted unit deviances.
+
+    Port of edgeR 5.0's sampleWeights() for a fit from glm_ql_fit (with
+    legacy=False), or a binomial fit from bin_fit() or bin_ql_fit(). The quasi-dispersion of each observation is taken to be
+    s2_g / w_i; returns the sample weights w_i, scaled to geometric mean 1,
+    as a genes x samples matrix (each row the same) for use as weights.
+    """
+    if glmfit.get('counts2') is not None:
+        from .binomial import _sample_weights_bin
+        return _sample_weights_bin(glmfit)
+    if glmfit.get('average.ql.dispersion') is None:
+        raise ValueError("Please run glm_ql_fit with legacy=False first")
+    y = np.asarray(glmfit['counts'], dtype=np.float64)
+    ntag, nlib = y.shape
+    w_mat = _as_tag_lib_matrix(glmfit.get('weights'), ntag, nlib, 1.0)
+    out = compute_adjust_mat(y, glmfit['fitted.values'], glmfit['design'],
+                             glmfit['dispersion'], glmfit['average.ql.dispersion'], w_mat)
+    s2 = np.maximum(np.asarray(glmfit['s2.prior'], dtype=np.float64), 1.0)
+    s2 = np.broadcast_to(s2.reshape(-1, 1) if s2.size > 1 else s2.reshape(1, 1), (ntag, 1))
+    w = np.log((out['unit_deviance'] * w_mat / s2).sum(axis=0) / out['unit_df'].sum(axis=0))
+    w = np.exp(np.mean(w) - w)
+    return np.tile(w, (ntag, 1))
+
+
 # ---------------------------------------------------------------------------
 # compute_prior: average quasi-dispersion using lowess trend
 # ---------------------------------------------------------------------------
@@ -666,10 +711,8 @@ def compute_adjust_vec(y, mu, design, dispersion, prior, weights=None):
 def compute_prior(ave_log_cpm, s2, df):
     """Compute average quasi-dispersion using lowess trend on s2^(1/4).
 
-    Port of ql_glm.c compute_prior().
-    Uses skmisc.loess which wraps the same Cleveland/Grosse Fortran code
-    as R's lowess/clowess, matching degree=1, span=0.5, family="symmetric",
-    iterations=3.
+    Port of ql_glm.c compute_prior(): the 90% quantile of a lowess trend
+    of s2^(1/4) against AveLogCPM, bounded below by 1, to the fourth power.
 
     Parameters
     ----------
@@ -685,42 +728,26 @@ def compute_prior(ave_log_cpm, s2, df):
     float
         Average quasi-dispersion (prior).
     """
-    from .weighted_lowess import weighted_lowess
+    from statsmodels.nonparametric.smoothers_lowess import lowess
 
-    threshold = 1e-8
-
-    # Filter genes with sufficient df
-    mask = df > threshold
-    xx = ave_log_cpm[mask].copy()
-    yy = np.power(np.maximum(s2[mask], 0), 0.25)  # s2^(1/4)
-
+    # Genes with df above 1e-8, fitted on the fourth-root scale
+    mask = df > 1e-8
+    xx = ave_log_cpm[mask]
+    yy = np.power(np.maximum(s2[mask], 0), 0.25)
     k = len(xx)
-    if k < 3:
+    if k == 0:
         return 1.0
-
-    # Fit lowess matching R's lowess(f=0.5, iter=3):
-    # R's lowess(iter=3) = 3 robustness iterations after initial fit = 4 total passes
-    # weighted_lowess(iterations=4) = 4 total passes (matching)
-    wl_result = weighted_lowess(xx, yy, span=0.5, iterations=4, npts=200)
-
-    # Get fitted values in sorted order for percentile computation
-    order = np.argsort(xx)
-    fitted = wl_result['fitted'][order]
-
-    # 90th percentile (R type=7 quantile, matching the C code exactly)
-    m = (k - 1) * 0.9
-    lo_idx = int(m)
-    h = m - lo_idx
-    fitted_sorted = np.sort(fitted)
-    if lo_idx + 1 < k:
-        p = (1.0 - h) * fitted_sorted[lo_idx] + h * fitted_sorted[lo_idx + 1]
+    if k == 1:
+        p = yy[0]
     else:
-        p = fitted_sorted[lo_idx]
+        # lowess(xx, yy, f = 0.5, iter = 3), as edgeR's clowess2, then the
+        # type-7 90% quantile of the trend
+        fitted = lowess(yy, xx, frac=0.5, it=3, delta=0.01 * np.ptp(xx),
+                        is_sorted=False, missing='none', return_sorted=False)
+        p = np.quantile(fitted, 0.9)
 
-    # Low bound is 1.0
-    if p < 1.0:
-        p = 1.0
-
+    # Low bound is 1
+    p = max(p, 1.0)
     return p ** 4
 
 

@@ -808,6 +808,26 @@ api:
   # Normalization
   # -----------------------------------------------------------------
 
+  - name: norm_lib_sizes
+    kind: function
+    domain: normalization
+    module: edgepython.normalization
+    r_equivalent: normLibSizes
+    description: >-
+      Same function as calc_norm_factors, under edgeR's newer name.
+    params:
+      - name: counts
+        type: [DGEList, ndarray]
+      - name: method
+        type: str
+        default: TMM
+    returns:
+      type: [DGEList, ndarray]
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_edger5_parity.py
+
   - name: calc_norm_factors
     kind: function
     domain: normalization
@@ -1613,6 +1633,25 @@ api:
     citations:
       - mccarthy2012
 
+  - name: sample_weights
+    kind: function
+    domain: glm
+    module: edgepython.ql_weights
+    r_equivalent: sampleWeights
+    description: >-
+      Empirical sample quality weights from the adjusted unit deviances
+      of a glm_ql_fit fit (new QL method) or a binomial fit from bin_fit
+      or bin_ql_fit.
+    params:
+      - name: glmfit
+        type: [DGEGLM, DGEBIN]
+    returns:
+      type: ndarray
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_edger5_parity.py
+
   - name: glm_ql_fit
     kind: function
     domain: glm_fitting
@@ -2074,18 +2113,104 @@ api:
     r_equivalent: null
     description: >-
       Universal reader that auto-detects input type (ndarray, DataFrame,
-      CSV path, kallisto directory, AnnData, or DGEList passthrough) and
-      returns a DGEList.
+      count table, 10X directory, AnnData, R .rds object, or quantifier
+      output from kallisto, lr-kallisto, Salmon, oarfish or RSEM) and
+      returns a DGEList. Quantifier output is read with the catch_*
+      readers, by default without dividing the counts.
     params:
-      - name: x
-        type: [str, ndarray, DataFrame, DGEList, AnnData]
+      - name: data
+        type: [str, list, ndarray, DataFrame, DGEList, AnnData]
         required: true
+      - name: source
+        type: str
+        description: >-
+          kallisto, lr_kallisto, salmon, oarfish, rsem, 10x, table,
+          anndata, rds, sparse, matrix or dataframe; auto-detected if None.
+      - name: format
+        type: str
+        description: For kallisto, 'h5' or 'tsv'.
+      - name: group
+        type: list
+      - name: labels
+        type: list
+      - name: ngibbs
+        type: int
+        default: 100
+      - name: divide
+        type: bool
+        description: Divide quantifier counts by the overdispersions.
+        default: false
     returns:
       type: DGEList
     impl_status: complete
     test_status: tested
     test_files:
       - test_io.py
+      - test_edger5_parity.py
+
+  - name: dgelist_from_tximport
+    kind: function
+    domain: io
+    module: edgepython.io
+    r_equivalent: DGEListFromTximport
+    description: >-
+      Create a DGEList from tximport output, with transcript length
+      annotation, RTA overdispersions from inferential replicates
+      (dividing the counts by default) and offset.prior for raw counts.
+    params:
+      - name: txi
+        type: dict
+      - name: samples
+        type: DataFrame
+        default: null
+      - name: group
+        type: list
+        default: null
+      - name: genes
+        type: DataFrame
+        default: null
+      - name: remove_zeros
+        type: bool
+        default: false
+      - name: divide
+        type: bool
+        default: true
+    returns:
+      type: DGEList
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_edger5_parity.py
+
+  - name: dgelist_from_tximeta
+    kind: function
+    domain: io
+    module: edgepython.io
+    r_equivalent: DGEListFromTximeta
+    description: >-
+      Create a DGEList from tximeta output, given as a dict of assays (a
+      SummarizedExperiment-like object) or an AnnData.
+    params:
+      - name: txm
+        type: [dict, AnnData]
+      - name: samples
+        type: DataFrame
+        default: null
+      - name: group
+        type: list
+        default: null
+      - name: remove_zeros
+        type: bool
+        default: false
+      - name: divide
+        type: bool
+        default: true
+    returns:
+      type: DGEList
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_edger5_parity.py
 
   - name: to_anndata
     kind: function
@@ -2168,66 +2293,719 @@ api:
   - name: catch_salmon
     kind: function
     domain: io
-    module: edgepython.io
+    module: edgepython.quant_readers
     r_equivalent: catchSalmon
     description: >-
-      Read Salmon quantification output directories into a DGEList with
-      overdispersion estimates from inferential replicates.
+      Read Salmon transcript quantifications with bootstrap or Gibbs
+      samples, estimating RTA overdispersions and dividing the counts by
+      them. Unpacks Gencode transcript names and stores the centred log
+      effective lengths as offset.prior.
     params:
-      - name: paths
+      - name: parent_dir
+        type: str
+        default: null
+      - name: sample_dirs
         type: list
-        required: true
+        default: null
+      - name: dgelist
+        type: bool
+        default: true
+      - name: divide
+        type: bool
+        default: true
+      - name: impute_eff_len
+        type: bool
+        default: true
+      - name: offset_prior
+        type: bool
+        default: true
       - name: verbose
         type: bool
         default: true
     returns:
-      type: DGEList
+      type: [DGEList, dict]
     impl_status: complete
-    test_status: untested
+    test_status: tested
+    test_files:
+      - test_edger5_parity.py
     citations:
       - baldoni2024a
       - baldoni2024b
 
+  - name: catch_salmon_gene
+    kind: function
+    domain: io
+    module: edgepython.quant_readers
+    r_equivalent: catchSalmonGene
+    description: >-
+      Read Salmon quantifications summarized to genes, from Gencode
+      transcript names or a tx2gene table; counts and resamples are
+      summed over transcripts before overdispersions are estimated.
+    params:
+      - name: parent_dir
+        type: str
+        default: null
+      - name: sample_dirs
+        type: list
+        default: null
+      - name: tx2gene
+        type: DataFrame
+        default: null
+      - name: remove_version
+        type: bool
+        default: true
+      - name: dgelist
+        type: bool
+        default: true
+      - name: divide
+        type: bool
+        default: true
+      - name: impute_eff_len
+        type: bool
+        default: true
+      - name: offset_prior
+        type: bool
+        default: true
+      - name: verbose
+        type: bool
+        default: true
+      - name: gene_length
+        type: str
+        default: moderate
+    returns:
+      type: [DGEList, dict]
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_edger5_parity.py
+    citations:
+      - baldoni2024a
+
   - name: catch_kallisto
     kind: function
     domain: io
-    module: edgepython.io
+    module: edgepython.quant_readers
     r_equivalent: catchKallisto
     description: >-
-      Read kallisto quantification output (HDF5 or plaintext) into a
-      DGEList with overdispersion estimates from bootstraps.
+      Read kallisto transcript quantifications (abundance.h5, or
+      abundance.tsv with plaintext bootstraps) with bootstrap-based RTA
+      overdispersions.
     params:
-      - name: paths
+      - name: parent_dir
+        type: str
+        default: null
+      - name: sample_dirs
         type: list
-        required: true
+        default: null
+      - name: dgelist
+        type: bool
+        default: true
+      - name: divide
+        type: bool
+        default: true
+      - name: impute_eff_len
+        type: bool
+        default: true
+      - name: offset_prior
+        type: bool
+        default: true
       - name: verbose
         type: bool
         default: true
     returns:
-      type: DGEList
+      type: [DGEList, dict]
     impl_status: complete
-    test_status: untested
+    test_status: tested
+    test_files:
+      - test_edger5_parity.py
+    citations:
+      - baldoni2024a
+
+  - name: catch_kallisto_gene
+    kind: function
+    domain: io
+    module: edgepython.quant_readers
+    r_equivalent: catchKallistoGene
+    description: >-
+      Read kallisto quantifications summarized to genes, as
+      catch_salmon_gene.
+    params:
+      - name: parent_dir
+        type: str
+        default: null
+      - name: sample_dirs
+        type: list
+        default: null
+      - name: tx2gene
+        type: DataFrame
+        default: null
+      - name: remove_version
+        type: bool
+        default: true
+      - name: dgelist
+        type: bool
+        default: true
+      - name: divide
+        type: bool
+        default: true
+      - name: impute_eff_len
+        type: bool
+        default: true
+      - name: offset_prior
+        type: bool
+        default: true
+      - name: verbose
+        type: bool
+        default: true
+      - name: gene_length
+        type: str
+        default: moderate
+    returns:
+      type: [DGEList, dict]
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_edger5_parity.py
+    citations:
+      - baldoni2024a
+
+  - name: catch_lr_kallisto
+    kind: function
+    domain: io
+    module: edgepython.quant_readers
+    r_equivalent: null
+    description: >-
+      edgePython addition. Read lr-kallisto (kallisto quant-tcc) output:
+      per-sample abundance files with bootstraps (--matrix-to-
+      directories or --matrix-to-files), or matrix.abundance.mtx without
+      bootstraps.
+    params:
+      - name: parent_dir
+        type: str
+        default: .
+      - name: sample_names
+        type: list
+        default: null
+      - name: dgelist
+        type: bool
+        default: true
+      - name: divide
+        type: bool
+        default: true
+      - name: impute_eff_len
+        type: bool
+        default: true
+      - name: offset_prior
+        type: bool
+        default: true
+      - name: verbose
+        type: bool
+        default: true
+    returns:
+      type: [DGEList, dict]
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_edger5_parity.py
+    citations:
+      - baldoni2024a
+
+  - name: catch_lr_kallisto_gene
+    kind: function
+    domain: io
+    module: edgepython.quant_readers
+    r_equivalent: null
+    description: >-
+      edgePython addition. lr-kallisto quantifications summarized to
+      genes.
+    params:
+      - name: parent_dir
+        type: str
+        default: .
+      - name: sample_names
+        type: list
+        default: null
+      - name: tx2gene
+        type: DataFrame
+        default: null
+      - name: remove_version
+        type: bool
+        default: true
+      - name: dgelist
+        type: bool
+        default: true
+      - name: divide
+        type: bool
+        default: true
+      - name: impute_eff_len
+        type: bool
+        default: true
+      - name: offset_prior
+        type: bool
+        default: true
+      - name: verbose
+        type: bool
+        default: true
+      - name: gene_length
+        type: str
+        default: moderate
+    returns:
+      type: [DGEList, dict]
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_edger5_parity.py
+    citations:
+      - baldoni2024a
+
+  - name: catch_oarfish
+    kind: function
+    domain: io
+    module: edgepython.quant_readers
+    r_equivalent: catchOarfish
+    description: >-
+      Read oarfish long-read transcript quantifications with parquet
+      bootstraps (needs pyarrow).
+    params:
+      - name: parent_dir
+        type: str
+        default: null
+      - name: prefixes
+        type: list
+        default: null
+      - name: dgelist
+        type: bool
+        default: true
+      - name: divide
+        type: bool
+        default: true
+      - name: verbose
+        type: bool
+        default: true
+    returns:
+      type: [DGEList, dict]
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_edger5_parity.py
+    citations:
+      - baldoni2024a
+
+  - name: catch_oarfish_gene
+    kind: function
+    domain: io
+    module: edgepython.quant_readers
+    r_equivalent: null
+    description: >-
+      edgePython addition. oarfish quantifications summarized to genes.
+    params:
+      - name: parent_dir
+        type: str
+        default: null
+      - name: prefixes
+        type: list
+        default: null
+      - name: tx2gene
+        type: DataFrame
+        default: null
+      - name: remove_version
+        type: bool
+        default: true
+      - name: dgelist
+        type: bool
+        default: true
+      - name: divide
+        type: bool
+        default: true
+      - name: verbose
+        type: bool
+        default: true
+    returns:
+      type: [DGEList, dict]
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_edger5_parity.py
     citations:
       - baldoni2024a
 
   - name: catch_rsem
     kind: function
     domain: io
-    module: edgepython.io
+    module: edgepython.quant_readers
     r_equivalent: catchRSEM
     description: >-
-      Read RSEM quantification output files into a DGEList.
+      Read RSEM *.isoforms.results files with Gibbs posterior summaries
+      (--calc-pme) and estimate RTA overdispersions.
     params:
+      - name: parent_dir
+        type: str
+        default: null
       - name: files
         type: list
-        required: true
+        default: null
+      - name: ngibbs
+        type: int
+        default: 100
+      - name: dgelist
+        type: bool
+        default: true
+      - name: divide
+        type: bool
+        default: true
+      - name: offset_prior
+        type: bool
+        default: true
       - name: verbose
         type: bool
         default: true
     returns:
-      type: DGEList
+      type: [DGEList, dict]
     impl_status: complete
-    test_status: untested
+    test_status: tested
+    test_files:
+      - test_edger5_parity.py
+    citations:
+      - baldoni2024a
+
+  - name: catch_rsem_gene
+    kind: function
+    domain: io
+    module: edgepython.quant_readers
+    r_equivalent: null
+    description: >-
+      edgePython addition. Read RSEM's gene-level *.genes.results files
+      and estimate gene overdispersions from their Gibbs summaries.
+    params:
+      - name: parent_dir
+        type: str
+        default: null
+      - name: files
+        type: list
+        default: null
+      - name: ngibbs
+        type: int
+        default: 100
+      - name: remove_version
+        type: bool
+        default: true
+      - name: dgelist
+        type: bool
+        default: true
+      - name: divide
+        type: bool
+        default: true
+      - name: offset_prior
+        type: bool
+        default: true
+      - name: verbose
+        type: bool
+        default: true
+    returns:
+      type: [DGEList, dict]
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_edger5_parity.py
+    citations:
+      - baldoni2024a
+
+  - name: split_gencode_tx_names
+    kind: function
+    domain: io
+    module: edgepython.quant_readers
+    r_equivalent: splitGencodeTxNames
+    description: >-
+      Split Gencode transcript names into Ensembl, Havana, name, length
+      and biotype fields.
+    params:
+      - name: x
+        type: list
+        default: null
+      - name: remove_version
+        type: bool
+        default: true
+    returns:
+      type: [DGEList, dict]
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_edger5_parity.py
+
+  - name: collapse_gencode_tx2gene
+    kind: function
+    domain: io
+    module: edgepython.quant_readers
+    r_equivalent: collapseGencodeTx2Gene
+    description: >-
+      Collapse split Gencode transcript annotation to genes, with
+      combined transcript types and the number of protein-coding
+      transcripts.
+    params:
+      - name: txann
+        type: DataFrame
+        default: null
+    returns:
+      type: [DGEList, dict]
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_edger5_parity.py
+
+  - name: make_pclist
+    kind: function
+    domain: binomial
+    module: edgepython.binomial
+    r_equivalent: PCList
+    description: >-
+      Create a PCList of paired counts (e.g. methylated and unmethylated
+      reads) for the same features and samples.
+    params:
+      - name: counts
+        type: ndarray
+        default: null
+      - name: counts2
+        type: ndarray
+        default: null
+      - name: samples
+        type: DataFrame
+        default: null
+      - name: group
+        type: list
+        default: null
+      - name: genes
+        type: DataFrame
+        default: null
+    returns:
+      type: PCList
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_edger5_parity.py
+
+  - name: read_bismark2pc
+    kind: function
+    domain: io
+    module: edgepython.binomial
+    r_equivalent: readBismark2PC
+    description: >-
+      Read Bismark coverage files into a PCList of methylated and
+      unmethylated counts.
+    params:
+      - name: files
+        type: list
+        default: null
+      - name: sample_names
+        type: list
+        default: null
+      - name: verbose
+        type: bool
+        default: true
+    returns:
+      type: PCList
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_edger5_parity.py
+
+  - name: rowsum_pclist
+    kind: function
+    domain: binomial
+    module: edgepython.binomial
+    r_equivalent: rowsum.PCList
+    description: >-
+      Sum a PCList's paired counts over groups of rows.
+    params:
+      - name: x
+        type: PCList
+        default: null
+      - name: group
+        type: list
+        default: null
+    returns:
+      type: PCList
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_edger5_parity.py
+
+  - name: bin_fit
+    kind: function
+    domain: binomial
+    module: edgepython.binomial
+    r_equivalent: binFit
+    description: >-
+      Fit a binomial GLM for each feature of paired counts (one-way
+      shortcut or IWLS).
+    params:
+      - name: y
+        type: PCList
+        default: null
+      - name: counts2
+        type: ndarray
+        default: null
+      - name: design
+        type: ndarray
+        default: null
+      - name: weights
+        type: ndarray
+        default: null
+      - name: offset
+        type: ndarray
+        default: null
+      - name: prior_count
+        type: float
+        default: 1
+    returns:
+      type: DGEBIN
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_edger5_parity.py
+
+  - name: bin_ql_fit
+    kind: function
+    domain: binomial
+    module: edgepython.binomial
+    r_equivalent: binQLFit
+    description: >-
+      Fit quasi-binomial GLMs with bias-adjusted deviances and empirical
+      Bayes quasi-dispersions.
+    params:
+      - name: y
+        type: PCList
+        default: null
+      - name: counts2
+        type: ndarray
+        default: null
+      - name: design
+        type: ndarray
+        default: null
+      - name: weights
+        type: ndarray
+        default: null
+      - name: offset
+        type: ndarray
+        default: null
+      - name: ave_log_cpm
+        type: ndarray
+        default: null
+      - name: abundance_trend
+        type: bool
+        default: true
+      - name: covariate_trend
+        type: ndarray
+        default: null
+      - name: robust
+        type: bool
+        default: true
+      - name: prior_count
+        type: float
+        default: 1
+    returns:
+      type: DGEBIN
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_edger5_parity.py
+
+  - name: bin_ql_ftest
+    kind: function
+    domain: binomial
+    module: edgepython.binomial
+    r_equivalent: binQLFTest
+    description: >-
+      Quasi-likelihood F-tests for binomial GLMs, with TREAT/UPSHOT
+      odds-ratio thresholds.
+    params:
+      - name: glmfit
+        type: DGEBIN
+        default: null
+      - name: coef
+        type: int
+        default: null
+      - name: contrast
+        type: ndarray
+        default: null
+      - name: or_
+        type: float
+        default: 1.0
+      - name: lor
+        type: float
+        default: null
+      - name: upshot
+        type: bool
+        default: true
+    returns:
+      type: DGELRT
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_edger5_parity.py
+
+  - name: mbin_one_way
+    kind: function
+    domain: binomial
+    module: edgepython.binomial
+    r_equivalent: mbinOneWay
+    description: >-
+      Fit one-way layout binomial models by groupwise weighted means.
+    params:
+      - name: y
+        type: ndarray
+        default: null
+      - name: z
+        type: ndarray
+        default: null
+      - name: design
+        type: ndarray
+        default: null
+      - name: group
+        type: list
+        default: null
+      - name: offset
+        type: ndarray
+        default: null
+      - name: weights
+        type: ndarray
+        default: null
+    returns:
+      type: dict
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_edger5_parity.py
+
+  - name: mbin_iwls
+    kind: function
+    domain: binomial
+    module: edgepython.binomial
+    r_equivalent: mbinIWLS
+    description: >-
+      Fit binomial logistic models by iteratively reweighted least
+      squares.
+    params:
+      - name: y
+        type: ndarray
+        default: null
+      - name: z
+        type: ndarray
+        default: null
+      - name: design
+        type: ndarray
+        default: null
+      - name: offset
+        type: ndarray
+        default: null
+      - name: weights
+        type: ndarray
+        default: null
+    returns:
+      type: dict
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_edger5_parity.py
 
   - name: feature_counts_to_dgelist
     kind: function

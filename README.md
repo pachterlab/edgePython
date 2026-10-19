@@ -2,6 +2,8 @@
 
 `edgePython` is a Python implementation of the Bioconductor `edgeR` package for differential analysis of genomics count data. It also includes a new single-cell differential expression method that extends the NEBULA-LN negative binomial mixed model with edgeR's TMM normalization and empirical Bayes dispersion shrinkage.
 
+**edgePython 0.5.0 matches edgeR 5.0.** edgePython's version numbers follow edgeR's major version with a leading 0 (edgePython 0.5 corresponds to edgeR 5). Results are checked function by function against edgeR 4.99.8 and limma 3.99.2, the Bioconductor development versions that become edgeR 5.0, and agree to within numerical precision (typically a relative difference of 1e-8 or less). The reference values come from [tests/data/edger5_parity.R](tests/data/edger5_parity.R) and are checked by [tests/test_edger5_parity.py](tests/test_edger5_parity.py). Where edgeR 5.0 has a bug, edgePython does what edgeR intends instead; these cases are listed under [edgeR bugs corrected in edgePython](#edger-bugs-corrected-in-edgepython).
+
 [![PyPI version](https://img.shields.io/pypi/v/edgepython)](https://pypi.org/project/edgepython/)
 [![PyPI downloads](https://static.pepy.tech/badge/edgepython)](https://pepy.tech/project/edgepython)
 [![License](https://img.shields.io/pypi/l/edgepython)](https://pypi.org/project/edgepython/)
@@ -61,11 +63,11 @@ print(top["table"].head())
 
 ### Normalization
 
-TMM, TMMwsp, RLE, and upper-quartile normalization via `calc_norm_factors`. Normalized expression values via `cpm`, `rpkm`, `tpm`, `ave_log_cpm`, `cpm_by_group`, and `rpkm_by_group`.
+TMM, TMMwsp, RLE, and upper-quartile normalization via `calc_norm_factors` (also available as `norm_lib_sizes`, edgeR's newer name). Normalized expression values via `cpm`, `rpkm`, `tpm`, `ave_log_cpm`, `cpm_by_group`, and `rpkm_by_group`.
 
 ### Filtering
 
-Gene filtering by expression level via `filter_by_expr`.
+Gene filtering by expression level via `filter_by_expr`, including edgeR 5.0's `preset` and `max_n_samples` options.
 
 ### Dispersion Estimation
 
@@ -75,24 +77,32 @@ Common, trended, and tagwise dispersion estimation (`estimate_disp`, `estimate_c
 
 - **Exact test**: `exact_test` for two-group comparisons with exact negative binomial tests, plus helpers (`exact_test_double_tail`, `equalize_lib_sizes`, `q2q_nbinom`, `split_into_groups`).
 - **GLM fitting**: `glm_fit`, `glm_ql_fit` for generalized linear model fitting.
-- **GLM testing**: likelihood ratio tests (`glm_lrt`), quasi-likelihood F-tests (`glm_ql_ftest`), and fold-change threshold testing (`glm_treat`).
+- **GLM testing**: likelihood ratio tests (`glm_lrt`), quasi-likelihood F-tests (`glm_ql_ftest`, with edgeR 5.0's TREAT and UPSHOT fold-change thresholds), and fold-change threshold testing (`glm_treat`).
 - **Results**: `top_tags` for extracting top DE genes with p-value adjustment, `decide_tests` for classifying genes as up/down/unchanged.
+
+### Linear Models and voom (limma)
+
+Ports of limma 3.99: `voom` (with offsets and an adaptive lowess span), `voom_lmfit`, `array_weights`, `duplicate_correlation` and `squeeze_var`.
 
 ### Gene Set Testing
 
-Competitive and self-contained gene set tests: `camera`, `fry`, `roast`, `mroast`, `romer`. Gene ontology and KEGG pathway enrichment via `goana` and `kegga`.
+Competitive and self-contained gene set tests: `camera`, `fry`, `roast`, `mroast`, `romer`. `camera` and `fry` follow limma 3.99, including observation weights and weighted gene sets. Gene ontology and KEGG pathway enrichment via `goana` and `kegga`.
 
 ### Differential Splicing
 
 Differential exon and transcript usage testing via `diff_splice` (GLM-based with LRT or QL tests), `diff_splice_dge` (exact test for two-group comparisons), and `splice_variants` (chi-squared tests for homogeneity of proportions across exons).
 
+### Paired Counts and Binomial Models
+
+Differential proportion analysis of paired counts, such as methylated and unmethylated reads, following edgeR 5.0: `make_pclist` and `read_bismark2pc` build a PCList; `bin_fit` fits binomial GLMs; `bin_ql_fit` and `bin_ql_ftest` give quasi-binomial F-tests with bias-adjusted deviances, empirical Bayes quasi-dispersions and TREAT/UPSHOT odds-ratio thresholds; `sample_weights` estimates sample quality weights from binomial or negative binomial QL fits.
+
 ### Quantification Uncertainty
 
-Reading quantification output with bootstrap or Gibbs sampling uncertainty from Salmon (`catch_salmon`), kallisto (`catch_kallisto`), and RSEM (`catch_rsem`). Overdispersion estimates from quantification uncertainty are used for differential transcript expression following the approach of Baldoni et al. (2024).
+Reading quantification output with bootstrap or Gibbs sampling uncertainty from Salmon (`catch_salmon`), kallisto (`catch_kallisto`), lr-kallisto (`catch_lr_kallisto`), oarfish (`catch_oarfish`) and RSEM (`catch_rsem`), each with a gene-level version (`catch_salmon_gene`, `catch_kallisto_gene`, `catch_lr_kallisto_gene`, `catch_oarfish_gene`, `catch_rsem_gene`). Overdispersion estimates from quantification uncertainty are used for differential transcript expression following the approach of Baldoni et al. (2024). Gencode transcript names are unpacked into annotation (`split_gencode_tx_names`, `collapse_gencode_tx2gene`). `dgelist_from_tximport` and `dgelist_from_tximeta` build a DGEList from tximport or tximeta output.
 
 ### I/O
 
-- **Universal reader**: `read_data` with auto-detection for kallisto (H5/TSV), Salmon, oarfish, RSEM, 10X CellRanger, CSV/TSV count tables, AnnData (`.h5ad`), and RDS files.
+- **Universal reader**: `read_data` with auto-detection for kallisto (H5/TSV), lr-kallisto, Salmon, oarfish, RSEM, 10X CellRanger, CSV/TSV count tables, AnnData (`.h5ad`), and RDS files. Quantifier output is read with the `catch_*` readers.
 - **Specialized readers**: `read_dge` (collates per-sample count files), `read_10x` (10X Genomics output), `feature_counts_to_dgelist` (featureCounts output), `read_bismark2dge` (Bismark methylation coverage).
 - **Single-cell aggregation**: `seurat_to_pb` for pseudo-bulk aggregation.
 - **Export**: `to_anndata` for converting DGEList and results to AnnData format.
@@ -116,6 +126,33 @@ Bismark coverage file reader (`read_bismark2dge`) and methylation-specific desig
 ### Utilities
 
 Design matrix construction (`model_matrix`), prior count addition (`add_prior_count`), predicted fold changes (`pred_fc`), Good-Turing smoothing (`good_turing`), count thinning/downsampling (`thin_counts`), Gini coefficient (`gini`), sum technical replicates (`sum_tech_reps`), negative binomial z-scores (`zscore_nbinom`), nearest TSS annotation (`nearest_tss`), and variance shrinkage (`squeeze_var`).
+
+## Features not in edgeR
+
+edgePython includes some functionality that edgeR does not have:
+
+- **Single-cell mixed model**: a NEBULA-LN negative binomial gamma mixed model for multi-subject single-cell data, combined with edgeR's TMM normalization and empirical Bayes dispersion shrinkage (`glm_sc_fit`, `shrink_sc_disp`, `glm_sc_test`).
+- **lr-kallisto**: `catch_lr_kallisto` and `catch_lr_kallisto_gene` read long-read quantifications from kallisto `quant-tcc`. Run with `-b` and `--matrix-to-directories` (or `--matrix-to-files`), the bootstraps give overdispersion estimates exactly as for kallisto.
+- **More gene-level readers**: `catch_oarfish_gene` (oarfish), and `catch_rsem_gene`, which uses the Gibbs summaries in RSEM's own `genes.results` files, so a gene-level reader is available for every supported quantifier.
+- **kallisto plaintext output**: `catch_kallisto` also reads `abundance.tsv` with plaintext bootstraps (`bs_abundance_*.tsv`); edgeR requires `abundance.h5`.
+- **tximeta without R**: `dgelist_from_tximeta` accepts an AnnData or a dictionary of assays in place of a SummarizedExperiment.
+- **Universal reader and AnnData export**: `read_data` detects and reads quantifier output, 10X data, count tables, AnnData (`.h5ad`) and, with R installed, R `.rds` objects; `to_anndata` exports results.
+- **MCP server**: [MCP/edgepython_server.py](MCP/edgepython_server.py) lets AI agents run a differential expression analysis through tool calls.
+
+## edgeR bugs corrected in edgePython
+
+These were found in edgeR 4.99.8 (the development version of edgeR 5.0) while checking edgePython against it. Each was confirmed by running edgeR. In each case edgePython follows what edgeR's code and documentation intend:
+
+- **`glmTreat` on legacy QL fits** (`glmQLFit(legacy=TRUE)`) fails with "object 'poisson.bound' not found". edgePython applies the Poisson bound as edgeR 4 did.
+- **`glmTreat` with `legacy=TRUE` and the interval null** gives misaligned p-values when any gene has NA statistics (for example all-zero genes): `j <- j[!is.na(j)]` removes entries from a logical index, so later genes receive another gene's adjustment. This was also edgeR 4's only `glmTreat` method. edgePython computes each gene separately.
+- **`estimateDisp(trend.method="none")`** fails when `min.row.sum` filters out any gene (also in edgeR 4). edgePython builds the prior for the genes that are kept.
+- **`estimateDisp` with gene-specific offsets and no design** fails. edgePython uses the group design that classic mode would use, so the offsets are honored.
+- **Weights passed with a DGEList or PCList**: `glmFit`, `glmQLFit`, `estimateDisp`, `estimateGLMCommonDisp`, `estimateGLMTrendedDisp`, `cpmByGroup`, `binFit` and `binQLFit` fail with "formal argument 'weights' matched by multiple actual arguments", and `aveLogCPM` silently ignores the weights. edgePython uses the weights as the object's own.
+- **`catchSalmonGene` and `catchKallistoGene` with `verbose=FALSE`** stop with "tx2gene not provided" on Gencode transcript names, because an `else` binds to `if(verbose)`. edgePython's gene readers work regardless of `verbose`.
+- **`catchSalmonGene`/`catchKallistoGene` with `gene.length="tximport"`** return the counts in place of the effective gene lengths when no gene has all-zero counts (an empty negative index). edgePython computes the TPM-weighted lengths in all cases.
+- **`catchSalmon` without bootstrap or Gibbs samples** (and the other transcript-level readers, which share the code) divides the counts by missing overdispersions and fails with "NA counts not allowed". edgePython leaves the counts undivided.
+- **`catchKallistoGene` with `remove.version=TRUE`** keeps version numbers on the gene IDs from `tx2gene`, unlike `catchSalmonGene`, whose documentation says `remove.version` applies to transcript and gene IDs. edgePython removes them.
+- **`binFit`/`binQLFit` with a rank-deficient weighted design** (for example a locus with no coverage in a batch) return that locus's coefficients in LINPACK's pivoted column order, so values appear under the wrong coefficients, which also affects `binQLFTest` TREAT/UPSHOT p-values. edgePython keeps the design's column order, with 0 for the inestimable coefficient.
 
 ## Examples
 

@@ -3,13 +3,18 @@
 I/O functions for edgePython.
 
 Port of edgeR's readDGE, read10X, featureCountsToMatrix,
-catchSalmon, catchKallisto, catchRSEM, catchOarfish.
+catchSalmon, catchKallisto, catchRSEM, catchOarfish, DGEListFromTximport,
+DGEListFromTximeta.
 """
 
 import os
+import re
 import warnings
 import numpy as np
 import pandas as pd
+
+# The catch* readers live in quant_readers; imported here for older code
+from .quant_readers import catch_salmon, catch_kallisto, catch_rsem  # noqa: F401
 
 
 def read_dge(files, path=None, columns=(0, 1), group=None, labels=None, sep='\t'):
@@ -175,80 +180,6 @@ def read_10x(path='.', mtx=None, genes=None, barcodes=None, as_dgelist=True):
     return {'counts': y, 'genes': gene_df, 'samples': samples_df}
 
 
-def catch_salmon(paths, verbose=True):
-    """Read Salmon quantification output.
-
-    Parameters
-    ----------
-    paths : list of str
-        Paths to Salmon output directories.
-    verbose : bool
-        Print progress.
-
-    Returns
-    -------
-    dict with counts, annotation, and samples.
-    """
-    return _catch_quant(paths, tool='salmon', verbose=verbose)
-
-
-def catch_kallisto(paths, verbose=True):
-    """Read kallisto quantification output.
-
-    Parameters
-    ----------
-    paths : list of str
-        Paths to kallisto output directories.
-    verbose : bool
-        Print progress.
-
-    Returns
-    -------
-    dict with counts, annotation, and samples.
-    """
-    return _catch_quant(paths, tool='kallisto', verbose=verbose)
-
-
-def catch_rsem(files, verbose=True):
-    """Read RSEM quantification output.
-
-    Parameters
-    ----------
-    files : list of str
-        RSEM output files.
-    verbose : bool
-        Print progress.
-
-    Returns
-    -------
-    dict with counts and annotation.
-    """
-    all_data = []
-    gene_ids = None
-
-    for f in files:
-        df = pd.read_csv(f, sep='\t')
-        if 'expected_count' in df.columns:
-            count_col = 'expected_count'
-        elif 'FPKM' in df.columns:
-            count_col = 'FPKM'
-        else:
-            count_col = df.columns[1]
-
-        if gene_ids is None:
-            gene_ids = df.iloc[:, 0].values
-        all_data.append(df[count_col].values)
-
-    counts = np.column_stack(all_data)
-    labels = [os.path.splitext(os.path.basename(f))[0] for f in files]
-
-    return {
-        'counts': counts,
-        'annotation': pd.DataFrame({'GeneID': gene_ids}),
-        'samples': pd.DataFrame({'files': files}, index=labels)
-    }
-
-
 def feature_counts_to_dgelist(files):
     """Convert featureCounts output to DGEList.
 
@@ -289,59 +220,6 @@ def feature_counts_to_dgelist(files):
 
     counts = np.column_stack(all_counts)
     return make_dgelist(counts, genes=gene_info)
-
-
-def _catch_quant(paths, tool='salmon', verbose=True):
-    """Internal function to read Salmon/kallisto output (legacy)."""
-    all_data = []
-    gene_ids = None
-    labels = []
-
-    for p in paths:
-        label = os.path.basename(os.path.normpath(p))
-        labels.append(label)
-
-        if tool == 'salmon':
-            quant_file = os.path.join(p, 'quant.sf')
-        else:
-            quant_file = os.path.join(p, 'abundance.tsv')
-
-        if not os.path.exists(quant_file):
-            raise FileNotFoundError(f"Cannot find {quant_file}")
-
-        df = pd.read_csv(quant_file, sep='\t')
-
-        if tool == 'salmon':
-            count_col = 'NumReads'
-            id_col = 'Name'
-            length_col = 'EffectiveLength'
-        else:
-            count_col = 'est_counts'
-            id_col = 'target_id'
-            length_col = 'eff_length'
-
-        if gene_ids is None:
-            gene_ids = df[id_col].values
-            if length_col in df.columns:
-                eff_length = df[length_col].values
-            else:
-                eff_length = None
-
-        all_data.append(df[count_col].values)
-
-        if verbose:
-            print(f"Reading {label}...")
-
-    counts = np.column_stack(all_data)
-    annotation = pd.DataFrame({'GeneID': gene_ids})
-    if eff_length is not None:
-        annotation['Length'] = eff_length
-
-    return {
-        'counts': counts,
-        'annotation': annotation,
-        'samples': pd.DataFrame({'files': paths}, index=labels)
-    }
 
 
 # =====================================================================
@@ -417,343 +295,6 @@ def _estimate_overdispersion(overdisp, df_arr):
 # =====================================================================
 # Format-specific readers for read_data()
 # =====================================================================
-
-def _read_kallisto_h5(paths, verbose):
-    """Read kallisto H5 output with bootstrap overdispersion.
-
-    Port of edgeR's catchKallisto.
-    """
-    try:
-        import h5py
-    except ImportError:
-        raise ImportError(
-            "h5py package required for kallisto H5 format. "
-            "Install with: pip install h5py"
-        )
-
-    n_samples = len(paths)
-    counts = None
-    overdisp = None
-    df_arr = None
-    ids = None
-    lengths = None
-    eff_lengths = None
-
-    for j, p in enumerate(paths):
-        h5_file = os.path.join(p, 'abundance.h5')
-        if not os.path.exists(h5_file):
-            raise FileNotFoundError(f"abundance.h5 not found in {p}")
-
-        with h5py.File(h5_file, 'r') as f:
-            n_tx = len(f['aux']['lengths'])
-            n_boot = int(np.asarray(f['aux']['num_bootstrap']).flat[0])
-
-            if verbose:
-                label = os.path.basename(os.path.normpath(p))
-                print(f"Reading {label}, {n_tx} transcripts, {n_boot} bootstraps")
-
-            if j == 0:
-                counts = np.zeros((n_tx, n_samples), dtype=np.float64)
-                overdisp = np.zeros(n_tx, dtype=np.float64)
-                df_arr = np.zeros(n_tx, dtype=np.int64)
-
-            # Store annotation from each sample (R uses the last sample's aux)
-            raw_ids = f['aux']['ids'][:]
-            ids = np.array([s.decode('utf-8') if isinstance(s, bytes) else str(s)
-                            for s in raw_ids])
-            lengths = np.asarray(f['aux']['lengths'][:], dtype=np.int64)
-            eff_lengths = np.asarray(f['aux']['eff_lengths'][:], dtype=np.float64)
-
-            counts[:, j] = f['est_counts'][:]
-
-            if n_boot > 0 and 'bootstrap' in f:
-                boot = np.column_stack([f['bootstrap'][f'bs{k}'][:] for k in range(n_boot)])
-                _accumulate_overdispersion(boot, overdisp, df_arr)
-
-    has_bootstraps = np.any(df_arr > 0)
-    ann_dict = {'Length': lengths, 'EffectiveLength': eff_lengths}
-    if has_bootstraps:
-        overdisp_final, overdisp_prior = _estimate_overdispersion(overdisp, df_arr)
-        ann_dict['Overdispersion'] = overdisp_final
-    else:
-        overdisp_prior = None
-    annotation = pd.DataFrame(ann_dict, index=ids)
-
-    return counts, annotation, ids, overdisp_prior
-
-
-def _read_kallisto_tsv(paths, verbose):
-    """Read kallisto TSV output (no bootstraps)."""
-    n_samples = len(paths)
-    all_data = []
-    ids = None
-    lengths = None
-    eff_lengths = None
-
-    for j, p in enumerate(paths):
-        tsv_file = os.path.join(p, 'abundance.tsv')
-        if not os.path.exists(tsv_file):
-            raise FileNotFoundError(f"abundance.tsv not found in {p}")
-
-        if verbose:
-            label = os.path.basename(os.path.normpath(p))
-            print(f"Reading {label}...")
-
-        df = pd.read_csv(tsv_file, sep='\t')
-        if j == 0:
-            ids = df['target_id'].values.astype(str)
-            lengths = df['length'].values.astype(np.int64)
-            eff_lengths = df['eff_length'].values.astype(np.float64)
-        all_data.append(df['est_counts'].values.astype(np.float64))
-
-    counts = np.column_stack(all_data)
-    annotation = pd.DataFrame({
-        'Length': lengths,
-        'EffectiveLength': eff_lengths,
-    }, index=ids)
-
-    return counts, annotation, ids, None
-
-
-def _read_kallisto(paths, fmt, verbose):
-    """Read kallisto output, dispatching to H5 or TSV."""
-    if fmt is None:
-        h5_path = os.path.join(paths[0], 'abundance.h5')
-        fmt = 'h5' if os.path.exists(h5_path) else 'tsv'
-
-    if fmt == 'h5':
-        return _read_kallisto_h5(paths, verbose)
-    else:
-        return _read_kallisto_tsv(paths, verbose)
-
-
-def _read_salmon(paths, verbose):
-    """Read Salmon output with bootstrap overdispersion.
-
-    Port of edgeR's catchSalmon.
-    """
-    import json
-    import gzip
-
-    n_samples = len(paths)
-    counts = None
-    overdisp = None
-    df_arr = None
-    ids = None
-    lengths = None
-    eff_lengths = None
-
-    for j, p in enumerate(paths):
-        label = os.path.basename(os.path.normpath(p))
-        quant_file = os.path.join(p, 'quant.sf')
-        meta_file = os.path.join(p, 'aux_info', 'meta_info.json')
-        boot_file = os.path.join(p, 'aux_info', 'bootstrap', 'bootstraps.gz')
-
-        if not os.path.exists(quant_file):
-            raise FileNotFoundError(f"quant.sf not found in {p}")
-
-        # Read meta info for bootstrap count
-        n_boot = 0
-        n_tx_meta = None
-        if os.path.exists(meta_file):
-            with open(meta_file) as mf:
-                meta = json.load(mf)
-            n_tx_meta = meta.get('num_targets') or meta.get('num_valid_targets')
-            n_boot = meta.get('num_bootstraps', 0)
-            samp_type = meta.get('samp_type', 'bootstrap')
-        else:
-            samp_type = 'bootstrap'
-
-        quant_df = pd.read_csv(quant_file, sep='\t')
-        n_tx = len(quant_df)
-
-        if verbose:
-            if n_boot > 0:
-                print(f"Reading {label}, {n_tx} transcripts, {n_boot} {samp_type} samples")
-            else:
-                print(f"Reading {label}, {n_tx} transcripts")
-
-        if j == 0:
-            counts = np.zeros((n_tx, n_samples), dtype=np.float64)
-            overdisp = np.zeros(n_tx, dtype=np.float64)
-            df_arr = np.zeros(n_tx, dtype=np.int64)
-            ids = quant_df['Name'].values.astype(str)
-            lengths = quant_df['Length'].values.astype(np.int64)
-            eff_lengths = quant_df['EffectiveLength'].values.astype(np.float64)
-
-        counts[:, j] = quant_df['NumReads'].values.astype(np.float64)
-
-        # Read binary bootstrap samples
-        if n_boot > 0 and os.path.exists(boot_file):
-            with gzip.open(boot_file, 'rb') as bf:
-                raw = bf.read()
-            # R: readBin(con, "double", n=NTx*NBoot); dim(Boot) <- c(NTx, NBoot)
-            # R fills column-major: first NTx values = bootstrap 0, etc.
-            all_vals = np.frombuffer(raw, dtype=np.float64)
-            boot = all_vals.reshape((n_tx, n_boot), order='F')
-            _accumulate_overdispersion(boot, overdisp, df_arr)
-
-    has_bootstraps = np.any(df_arr > 0)
-    ann_dict = {'Length': lengths, 'EffectiveLength': eff_lengths}
-    if has_bootstraps:
-        overdisp_final, overdisp_prior = _estimate_overdispersion(overdisp, df_arr)
-        ann_dict['Overdispersion'] = overdisp_final
-    else:
-        overdisp_prior = None
-    annotation = pd.DataFrame(ann_dict, index=ids)
-
-    return counts, annotation, ids, overdisp_prior
-
-
-def _read_oarfish(paths, path, verbose):
-    """Read oarfish output with parquet bootstrap overdispersion.
-
-    Port of edgeR's catchOarfish.
-    """
-    import json
-
-    # If paths is None, auto-discover .quant files in path
-    if paths is None:
-        if path is None:
-            path = '.'
-        quant_files = sorted([f for f in os.listdir(path) if f.endswith('.quant')])
-        if not quant_files:
-            raise FileNotFoundError(f"No oarfish .quant files found in {path}")
-        prefixes = [os.path.join(path, f[:-6]) for f in quant_files]
-    else:
-        # paths is list of prefixes or full .quant paths
-        prefixes = []
-        for p in paths:
-            if p.endswith('.quant'):
-                prefixes.append(p[:-6])
-            else:
-                prefixes.append(p)
-
-    n_samples = len(prefixes)
-    counts = None
-    overdisp = None
-    df_arr = None
-    ids = None
-    lengths = None
-
-    for j, prefix in enumerate(prefixes):
-        quant_file = f"{prefix}.quant"
-        meta_file = f"{prefix}.meta_info.json"
-        boot_file = f"{prefix}.infreps.pq"
-
-        if not os.path.exists(quant_file):
-            raise FileNotFoundError(f"{quant_file} not found")
-
-        n_boot = 0
-        if os.path.exists(meta_file):
-            with open(meta_file) as mf:
-                meta = json.load(mf)
-            n_boot = meta.get('num_bootstraps', 0)
-
-        quant_df = pd.read_csv(quant_file, sep='\t')
-        n_tx = len(quant_df)
-
-        if verbose:
-            label = os.path.basename(prefix)
-            print(f"Reading {label}, {n_tx} transcripts, {n_boot} bootstraps")
-
-        if j == 0:
-            counts = np.zeros((n_tx, n_samples), dtype=np.float64)
-            overdisp = np.zeros(n_tx, dtype=np.float64)
-            df_arr = np.zeros(n_tx, dtype=np.int64)
-            ids = quant_df['tname'].values.astype(str)
-            lengths = quant_df['len'].values.astype(np.int64)
-
-        counts[:, j] = quant_df['num_reads'].values.astype(np.float64)
-
-        if n_boot > 0 and os.path.exists(boot_file):
-            try:
-                boot = pd.read_parquet(boot_file).values.astype(np.float64)
-            except ImportError:
-                raise ImportError(
-                    "pyarrow package required for oarfish parquet bootstraps. "
-                    "Install with: pip install pyarrow"
-                )
-            _accumulate_overdispersion(boot, overdisp, df_arr)
-
-    has_bootstraps = np.any(df_arr > 0)
-    ann_dict = {'Length': lengths}
-    if has_bootstraps:
-        overdisp_final, overdisp_prior = _estimate_overdispersion(overdisp, df_arr)
-        ann_dict['Overdispersion'] = overdisp_final
-    else:
-        overdisp_prior = None
-    annotation = pd.DataFrame(ann_dict, index=ids)
-
-    return counts, annotation, ids, overdisp_prior
-
-
-def _read_rsem_data(files, path, ngibbs, verbose):
-    """Read RSEM output with Gibbs-based overdispersion.
-
-    Port of edgeR's catchRSEM.
-    """
-    n_samples = len(files)
-    if isinstance(ngibbs, (int, float)):
-        ngibbs = [int(ngibbs)] * n_samples
-
-    counts = None
-    overdisp = None
-    df_arr = None
-    ids = None
-    lengths = None
-    eff_lengths = None
-
-    for j, f in enumerate(files):
-        full_path = os.path.join(path, f) if path else f
-        if not os.path.exists(full_path):
-            raise FileNotFoundError(f"{full_path} not found")
-
-        quant_df = pd.read_csv(full_path, sep='\t')
-        if 'expected_count' not in quant_df.columns:
-            raise ValueError(f"File {f} doesn't contain expected_count column")
-
-        n_tx = len(quant_df)
-        ng = ngibbs[j]
-
-        if verbose:
-            print(f"Reading {os.path.basename(f)}, {n_tx} transcripts, {ng} Gibbs samples")
-
-        if j == 0:
-            counts = np.zeros((n_tx, n_samples), dtype=np.float64)
-            overdisp = np.zeros(n_tx, dtype=np.float64)
-            df_arr = np.zeros(n_tx, dtype=np.int64)
-            id_col = 'transcript_id' if 'transcript_id' in quant_df.columns else quant_df.columns[0]
-            ids = quant_df[id_col].values.astype(str)
-            lengths = quant_df['length'].values.astype(np.int64) if 'length' in quant_df.columns else None
-            eff_lengths = quant_df['effective_length'].values.astype(np.float64) if 'effective_length' in quant_df.columns else None
-
-        counts[:, j] = quant_df['expected_count'].values.astype(np.float64)
-
-        # RSEM Gibbs overdispersion: (ngibbs-1) * S^2 / M
-        M_col = quant_df.get('posterior_mean_count')
-        S_col = quant_df.get('posterior_standard_deviation_of_count')
-        if M_col is not None and S_col is not None and ng > 0:
-            M = M_col.values.astype(np.float64)
-            S = S_col.values.astype(np.float64)
-            pos = M > 0
-            overdisp[pos] += (ng - 1) * (S[pos] ** 2) / M[pos]
-            df_arr[pos] += ng - 1
-
-    has_bootstraps = np.any(df_arr > 0)
-    ann_dict = {}
-    if lengths is not None:
-        ann_dict['Length'] = lengths
-    if eff_lengths is not None:
-        ann_dict['EffectiveLength'] = eff_lengths
-    if has_bootstraps:
-        overdisp_final, overdisp_prior = _estimate_overdispersion(overdisp, df_arr)
-        ann_dict['Overdispersion'] = overdisp_final
-    else:
-        overdisp_prior = None
-    annotation = pd.DataFrame(ann_dict, index=ids)
-
-    return counts, annotation, ids, overdisp_prior
 
 
 def _read_anndata(data, group, labels, obs_col, layer, verbose):
@@ -1163,6 +704,9 @@ def _auto_detect_source(data, fmt):
                 return '10x'
             if 'quant.sf' in contents:
                 return 'salmon'
+            if 'matrix.abundance.mtx' in contents or any(
+                    re.fullmatch(r'abundance_\d+(\.h5|\.tsv)?', f) for f in contents):
+                return 'lr_kallisto'
             if 'abundance.tsv' in contents or 'abundance.h5' in contents:
                 return 'kallisto'
             if any(f.endswith('.quant') for f in contents):
@@ -1223,6 +767,7 @@ def read_data(
     obs_col=None,
     layer=None,
     ngibbs=100,
+    divide=False,
     verbose=True,
 ):
     """Universal data import for edgePython.
@@ -1248,8 +793,10 @@ def read_data(
         - DataFrame: count matrix with gene names as index
     source : str or None
         Data source. Auto-detected if None.
-        One of: 'kallisto', 'salmon', 'oarfish', 'rsem', '10x',
-        'table', 'anndata', 'rds', 'sparse', 'matrix', 'dataframe'.
+        One of: 'kallisto', 'lr_kallisto', 'salmon', 'oarfish', 'rsem',
+        '10x', 'table', 'anndata', 'rds', 'sparse', 'matrix', 'dataframe'.
+        The quantifier sources use the catch_* readers (catch_kallisto,
+        catch_lr_kallisto, catch_salmon, catch_oarfish, catch_rsem).
     format : str or None
         For kallisto: 'h5' or 'tsv'. If None, prefers H5 when available.
     path : str or None
@@ -1268,6 +815,10 @@ def read_data(
         For AnnData: layer name to use instead of .X.
     ngibbs : int or array-like
         For RSEM: number of Gibbs samples per sample.
+    divide : bool
+        For quantifier output: divide the counts by the overdispersions,
+        as the catch_* readers do by default. False keeps the counts as
+        quantified, with the overdispersions in genes['Overdispersion'].
     verbose : bool
         Print progress messages.
 
@@ -1350,38 +901,242 @@ def read_data(
     if path is not None:
         paths = [os.path.join(path, p) for p in paths]
 
-    if labels is None:
+    if labels is None and source not in ('lr_kallisto', 'oarfish'):
         labels = [os.path.basename(os.path.normpath(p)) for p in paths]
 
-    overdisp_prior = None
+    # The catch_* readers' code, keeping read_data's transcript names (no
+    # Gencode unpacking) and its EffectiveLength column
+    from . import quant_readers as qr
+    common = dict(divide=divide, verbose=verbose, unpack_gencode=False,
+                  effective_length_column=True)
     if source == 'kallisto':
-        counts, annotation, ids, overdisp_prior = _read_kallisto(paths, format, verbose)
+        dge = qr._assemble_tx(qr._kallisto_samples(paths, verbose, format), **common)
+    elif source == 'lr_kallisto':
+        samples, has_eff = qr._lr_eff_len(qr._lr_kallisto_samples(paths[0], labels, verbose))
+        has_length = bool(samples) and samples[0]['length'] is not None
+        dge = qr._assemble_tx(samples, has_eff_len=has_eff, impute_eff_len=has_length, **common)
     elif source == 'salmon':
-        counts, annotation, ids, overdisp_prior = _read_salmon(paths, verbose)
+        dge = qr._assemble_tx(qr._salmon_samples(paths, verbose), **common)
     elif source == 'oarfish':
-        counts, annotation, ids, overdisp_prior = _read_oarfish(
-            paths if isinstance(data, (list, tuple)) else None,
-            path=data if isinstance(data, str) and os.path.isdir(data) else None,
-            verbose=verbose)
+        prefixes = qr._oarfish_prefixes(data, None) if isinstance(data, str) and os.path.isdir(data) \
+            else qr._oarfish_prefixes(None, paths)
+        dge = qr._assemble_tx(qr._oarfish_samples(prefixes, verbose), has_eff_len=False,
+                              drop_ann_length=False, **common)
     elif source == 'rsem':
-        counts, annotation, ids, overdisp_prior = _read_rsem_data(
-            paths, path=None, ngibbs=ngibbs, verbose=verbose)
+        files = [str(f) for f in paths]
+        if all(f.endswith('.genes.results') for f in files):
+            dge = qr.catch_rsem_gene(files=files, ngibbs=ngibbs, remove_version=False,
+                                     divide=divide, verbose=verbose)
+        else:
+            dge = qr._assemble_tx(qr._rsem_samples(files, ngibbs, 'transcript_id', verbose),
+                                  impute_eff_len=False, log_zero=1e-8, **common)
     else:
         raise ValueError(f"Unknown source: {source!r}")
 
-    dge = make_dgelist(counts, group=group, genes=annotation)
-
-    # Restore transcript IDs as genes index (make_dgelist overwrites with numeric)
-    if ids is not None and 'genes' in dge:
-        dge['genes'].index = ids
-
-    if overdisp_prior is not None and not np.isnan(overdisp_prior):
-        dge['overdispersion.prior'] = overdisp_prior
-
-    if labels is not None:
-        dge['samples'].index = labels
-
+    if group is not None:
+        from .dgelist import _drop_empty_levels
+        if len(group) != dge['counts'].shape[1]:
+            raise ValueError("Length of 'group' must equal number of columns in 'counts'")
+        dge['samples']['group'] = _drop_empty_levels(pd.Categorical(group))
+    if labels is not None and source != 'lr_kallisto':
+        dge['samples'].index = pd.Index(labels)
     return dge
+
+
+# =====================================================================
+# DGEList from tximport / tximeta output
+# =====================================================================
+
+def _tx_length_annotation(length):
+    """Log lengths, AveLength and Max2MinLength from a genes x samples
+    matrix of effective lengths."""
+    ltxl = np.log(np.asarray(length, dtype=np.float64))
+    return ltxl, np.exp(ltxl.mean(axis=1)), np.exp(ltxl.max(axis=1) - ltxl.min(axis=1))
+
+
+def _dgelist_from_tx(counts, ltxl, genes, overdisp, counts_from_abundance,
+                     samples, group, divide):
+    """Shared end of DGEListFromTximport and DGEListFromTximeta."""
+    from .dgelist import make_dgelist
+
+    if divide:
+        if overdisp is not None:
+            counts = counts / overdisp[:, np.newaxis]
+        else:
+            divide = False
+    y = make_dgelist(counts, samples=samples, group=group, genes=genes, remove_zeros=False)
+    y['divided.counts'] = divide
+    if counts_from_abundance == 'no':
+        y['tximport.counts'] = 'raw'
+        y['offset.prior'] = ltxl - ltxl.mean(axis=1, keepdims=True)
+    else:
+        y['tximport.counts'] = counts_from_abundance
+    return y
+
+
+def _row_names(x):
+    return x.index if isinstance(x, pd.DataFrame) else None
+
+
+def dgelist_from_tximport(txi, samples=None, group=None, genes=None,
+                          remove_zeros=False, divide=True):
+    """Create a DGEList from tximport output.
+
+    Port of edgeR's DGEListFromTximport().
+
+    Parameters
+    ----------
+    txi : dict
+        tximport-style result with 'counts' and 'length' (genes x samples
+        arrays or DataFrames), 'countsFromAbundance' ('no', 'scaledTPM',
+        'lengthScaledTPM' or 'dtuScaledTPM') and optionally 'infReps', a
+        list with one genes x replicates array of inferential replicates
+        per sample.
+    samples : DataFrame, optional
+        Sample annotation.
+    group : array-like, optional
+        Group factor.
+    genes : DataFrame, optional
+        Gene annotation, one row per gene.
+    remove_zeros : bool
+        Remove genes with all-zero counts.
+    divide : bool
+        Divide the counts by the RTA overdispersions estimated from the
+        inferential replicates, when there are any.
+
+    Returns
+    -------
+    DGEList with genes AveLength, Max2MinLength and (with inferential
+    replicates) Overdispersion. With countsFromAbundance 'no', the
+    centred log effective lengths are stored as offset.prior.
+    """
+    missing = [k for k in ('counts', 'length', 'countsFromAbundance') if k not in txi]
+    if missing:
+        raise ValueError(f"Component(s) {','.join(missing)} not found in txi")
+    ids = _row_names(txi['counts'])
+    counts = np.asarray(txi['counts'], dtype=np.float64)
+    ngenes, nsamples = counts.shape
+
+    ltxl, ave_length, max2min = _tx_length_annotation(txi['length'])
+    if genes is None:
+        genes = pd.DataFrame({'AveLength': ave_length, 'Max2MinLength': max2min}, index=ids)
+    else:
+        genes = pd.DataFrame(genes).copy()
+        if genes.shape[0] != ngenes:
+            raise ValueError("nrow(genes) is different from nrow(txi['counts'])")
+        genes['AveLength'] = ave_length
+        genes['Max2MinLength'] = max2min
+
+    overdisp = None
+    if txi.get('infReps') is not None:
+        overdisp = np.zeros(ngenes)
+        df_arr = np.zeros(ngenes)
+        for boot in txi['infReps']:
+            _accumulate_overdispersion(np.asarray(boot, dtype=np.float64), overdisp, df_arr)
+        overdisp, _ = _estimate_overdispersion(overdisp, df_arr)
+        genes['Overdispersion'] = overdisp
+
+    if ids is not None:
+        counts = pd.DataFrame(counts, index=ids, columns=txi['counts'].columns)
+    y = _dgelist_from_tx(counts, ltxl, genes, overdisp, txi['countsFromAbundance'],
+                         samples, group, divide)
+    if remove_zeros:
+        keep = np.asarray(y['counts'], dtype=np.float64).mean(axis=1) >= 1e-6
+        if not np.all(keep):
+            y = y[keep]
+    return y
+
+
+def dgelist_from_tximeta(txm, samples=None, group=None, remove_zeros=False, divide=True):
+    """Create a DGEList from tximeta output.
+
+    Port of edgeR's DGEListFromTximeta().
+
+    Parameters
+    ----------
+    txm : dict or AnnData
+        A SummarizedExperiment-like object: a dict with 'assays' (a dict
+        of genes x samples arrays with 'counts', 'length' and optionally
+        'infRep1', 'infRep2', ...), 'rowData' (gene annotation DataFrame,
+        optional) and 'metadata' (dict, optional, with
+        'countsFromAbundance'). An AnnData (samples x genes) is read the
+        same way from its layers (counts may be in X), var and uns.
+    samples, group : optional
+        Sample annotation and group factor.
+    remove_zeros : bool
+        Remove genes with all-zero counts before anything is computed.
+    divide : bool
+        Divide the counts by the RTA overdispersions, when there are
+        inferential replicates.
+
+    Returns
+    -------
+    DGEList, as from dgelist_from_tximport, with the row annotation of txm
+    as genes.
+    """
+    if hasattr(txm, 'layers') and hasattr(txm, 'var'):
+        assays = {k: np.asarray(v.toarray() if hasattr(v, 'toarray') else v).T
+                  for k, v in txm.layers.items()}
+        if 'counts' not in assays and txm.X is not None:
+            x = txm.X
+            assays['counts'] = np.asarray(x.toarray() if hasattr(x, 'toarray') else x).T
+        row_data = txm.var.copy()
+        metadata = dict(txm.uns)
+    else:
+        assays = txm.get('assays', {})
+        row_data = txm.get('rowData', txm.get('rowRanges'))
+        metadata = txm.get('metadata') or {}
+    if 'counts' not in assays:
+        raise ValueError("txm object doesn't contain counts assay")
+    if 'length' not in assays:
+        raise ValueError("txm object doesn't contain length assay")
+
+    counts = np.asarray(assays['counts'], dtype=np.float64)
+    ngenes = counts.shape[0]
+    ids = _row_names(assays['counts'])
+    if row_data is None:
+        row_data = pd.DataFrame(index=ids if ids is not None else range(ngenes))
+    genes = pd.DataFrame(row_data).copy()
+    if ids is None and not isinstance(genes.index, pd.RangeIndex):
+        ids = genes.index
+    rep_names = [k for k in assays if 'infRep' in k]
+    keep = np.ones(ngenes, dtype=bool)
+    if remove_zeros:
+        keep = counts.mean(axis=1) >= 1e-6
+    counts = counts[keep]
+    genes = genes.iloc[np.flatnonzero(keep)]
+    if 'gene_id' in genes.columns:
+        genes['gene_id'] = genes['gene_id'].astype(str)
+
+    ltxl, ave_length, max2min = _tx_length_annotation(np.asarray(assays['length'])[keep])
+    genes['AveLength'] = ave_length
+    genes['Max2MinLength'] = max2min
+
+    overdisp = None
+    if rep_names:
+        # Means and variances over the replicates by Welford's algorithm
+        reps = [np.asarray(assays[k], dtype=np.float64)[keep] for k in rep_names]
+        n = 1
+        M = reps[0].copy()
+        V = np.zeros_like(M)
+        for r in reps[1:]:
+            n += 1
+            delta = r - M
+            M = M + delta / n
+            V = V + delta * (r - M)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            overdisp = np.nansum(V / M, axis=1)
+        df_arr = (n - 1) * np.sum(M > 0, axis=1).astype(np.float64)
+        overdisp, _ = _estimate_overdispersion(overdisp, df_arr)
+        genes['Overdispersion'] = overdisp
+
+    columns = assays['counts'].columns if isinstance(assays['counts'], pd.DataFrame) else None
+    if ids is not None:
+        ids = np.asarray(ids)[keep]
+        genes.index = ids
+        counts = pd.DataFrame(counts, index=ids, columns=columns)
+    return _dgelist_from_tx(counts, ltxl, genes, overdisp, metadata.get('countsFromAbundance'),
+                            samples, group, divide)
 
 
 # =====================================================================

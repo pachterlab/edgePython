@@ -761,8 +761,8 @@ def _fit_f_dist_unequal_df1(x, df1, covariate=None, span=None, robust=True, prio
     -------
     dict with keys: scale, df2, and optionally df2_shrunk, df2_outlier.
     """
-    from scipy.optimize import minimize_scalar
     from scipy.special import gammaln
+    from .utils import optimize_brent
 
     x = np.asarray(x, dtype=np.float64).copy()
     df1 = np.atleast_1d(np.asarray(df1, dtype=np.float64)).copy()
@@ -826,15 +826,8 @@ def _fit_f_dist_unequal_df1(x, df1, covariate=None, span=None, robust=True, prio
         covariate = np.asarray(covariate, dtype=np.float64)
         if span is None:
             span = choose_lowess_span(n, small_n=500)
-        # Normalize weights: w / quantile(w, 0.75), clipped to [1e-8, 100]
-        w_q75 = np.quantile(w, 0.75)
-        loess_w = w / w_q75 if w_q75 > 0 else w.copy()
-        loess_w = np.clip(loess_w, 1e-08, 100)
-
-        from .weighted_lowess import weighted_lowess as _wlowess
-        wl_result = _wlowess(covariate, e, weights=loess_w, span=span,
-                             iterations=1, npts=200)
-        emean = wl_result['fitted']
+        emean = _loess_fit(e, covariate, weights=w / np.quantile(w, 0.75),
+                           span=span, iterations=1, min_weight=1e-8, max_weight=1e2)
 
     d1x = d1 * xpos
 
@@ -850,8 +843,10 @@ def _fit_f_dist_unequal_df1(x, df1, covariate=None, span=None, robust=True, prio
             return -2 * np.sum(prior_weights * ll)
         return -2 * np.sum(ll)
 
-    opt = minimize_scalar(minus_twice_loglik, bounds=(0.5, 0.9998), method='bounded')
-    d2 = opt.x / (1 - opt.x)
+    # R's optimize(); the estimate is often at the upper bound, where the
+    # answer depends on exactly where the search stops
+    par = optimize_brent(minus_twice_loglik, 0.5, 0.9998)
+    d2 = par / (1 - par)
     s20 = np.exp(emean - logmdigamma(d2))
 
     if not robust:
@@ -948,65 +943,92 @@ def is_fullrank(x):
     return np.linalg.matrix_rank(x) == x.shape[1]
 
 
-def choose_lowess_span(n, small_n=25, min_span=0.2, power=1/3):
+def _loess_fit(y, x, weights=None, span=0.3, iterations=4, min_weight=1e-5,
+               max_weight=1e5):
+    """Fitted values of limma's loessFit() for finite y and x.
+
+    With unequal weights this is weightedLowess (npts = 200). Equal or no
+    weights fall back to lowess(iter = iterations - 1), and too few
+    weighted points to a weighted straight line, as in limma.
+    """
+    from statsmodels.nonparametric.smoothers_lowess import lowess as _sm_lowess
+    y = np.asarray(y, dtype=np.float64)
+    x = np.asarray(x, dtype=np.float64)
+    n = len(y)
+    if span < 1 / n:
+        return y.copy()
+    if weights is not None:
+        w = np.clip(np.nan_to_num(np.asarray(weights, dtype=np.float64)),
+                    max(min_weight, 0), max_weight)
+        if np.ptp(w) < 1e-15:
+            weights = None
+    if weights is None:
+        return _sm_lowess(y, x, frac=span, it=iterations - 1, delta=0.01 * np.ptp(x),
+                          is_sorted=False, missing='none', return_sorted=False)
+    nw = n if min_weight > 0 else int(np.sum(w > 0))
+    if nw < 4 + 1 / span:
+        if nw == 1:
+            return np.full(n, y[w > 0][0])
+        sw = np.sqrt(w)
+        X = np.column_stack([np.ones(n), x])
+        coef = np.linalg.lstsq(X * sw[:, None], y * sw, rcond=None)[0]
+        return X @ coef
+    from .weighted_lowess import weighted_lowess
+    return weighted_lowess(x, y, weights=w, span=span, iterations=iterations,
+                           npts=200)['fitted']
+
+
+def choose_lowess_span(n=1000, small_n=50, min_span=0.3, power=1/3):
     """Choose lowess span based on number of observations.
 
-    Port of limma's chooseLowessSpan().
+    Port of limma's chooseLowessSpan(), with its defaults.
     Formula: min(min_span + (1 - min_span) * (small_n/n)^power, 1)
     """
     return min(min_span + (1 - min_span) * (small_n / n) ** power, 1.0)
 
 
 def contrast_as_coef(design, contrast, first=False):
-    """Reform a design matrix so that a contrast becomes a coefficient.
+    """Reparametrize a design so that contrasts become coefficients.
 
-    Port of limma's contrastAsCoef().
-
-    Parameters
-    ----------
-    design : ndarray
-        Design matrix.
-    contrast : array-like
-        Contrast vector.
-    first : bool
-        If True, put contrast as first column.
-
-    Returns
-    -------
-    dict with 'design' (reformed design) and 'coef' (column index of contrast).
+    Port of limma's contrastAsCoef(). The contrast matrix is QR-decomposed
+    with the column pivoting of R's qr() (LINPACK dqrdc2, tol 1e-7), the
+    design is rotated by Q, and the first rank(contrast) coefficients are
+    back-solved by R so that each equals its contrast. Returns 'design',
+    'coef' (an int for a contrast vector, a list for a matrix) and 'rank'.
     """
+    from scipy.linalg import solve_triangular
     design = np.asarray(design, dtype=np.float64)
-    contrast = np.asarray(contrast, dtype=np.float64).ravel()
+    contrast = np.asarray(contrast, dtype=np.float64)
+    vector = contrast.ndim == 1
+    if vector:
+        contrast = contrast.reshape(-1, 1)
     p = design.shape[1]
-
-    if len(contrast) != p:
+    if contrast.shape[0] != p:
         raise ValueError("Length of contrast must equal number of columns in design")
 
-    # Port of limma's contrastAsCoef: QR decompose contrast, apply Q^T
-    # rotation, then backsolve the contrast coefficient row by R so that
-    # the coefficient directly represents the contrast effect.
-    contrast_mat = contrast.reshape(-1, 1)
-    Q, R_mat = np.linalg.qr(contrast_mat, mode='complete')
-    r_val = R_mat[0, 0]  # scalar R factor (= ±||contrast||)
+    # Columns that R's qr() keeps, in order; negligible ones go to the end
+    keep, basis = [], np.zeros((p, 0))
+    for j in range(contrast.shape[1]):
+        col = contrast[:, j]
+        norm = np.linalg.norm(col)
+        resid = col - basis @ (basis.T @ col)
+        if norm > 0 and np.linalg.norm(resid) >= 1e-7 * norm:
+            keep.append(j)
+            basis = np.column_stack([basis, resid / np.linalg.norm(resid)])
+    r = len(keep)
+    if r == 0:
+        raise ValueError("contrast is all zero")
+    pivot = keep + [j for j in range(contrast.shape[1]) if j not in keep]
 
-    # design_rotated = design @ Q (apply QR rotation)
-    design_rotated = design @ Q
-
-    # Backsolve: divide contrast coefficient column by R to normalize
-    # This makes the coefficient directly represent the logFC
-    ncontrasts = 1
-    design_rotated[:, 0] = design_rotated[:, 0] / r_val
-
-    if first:
-        new_design = design_rotated
-        coef = 0
-    else:
-        # Move contrast column (first) to last
-        cols = list(range(1, p)) + [0]
-        new_design = design_rotated[:, cols]
-        coef = p - 1
-
-    return {'design': new_design, 'coef': coef}
+    Q, R_mat = np.linalg.qr(contrast[:, pivot], mode='complete')
+    design_t = Q.T @ design.T
+    design_t[:r] = solve_triangular(R_mat[:r, :r], design_t[:r])
+    new_design = design_t.T
+    coef = list(range(r))
+    if not first:
+        new_design = np.column_stack([new_design[:, r:], new_design[:, :r]])
+        coef = list(range(p - r, p))
+    return {'design': new_design, 'coef': coef[0] if vector else coef, 'rank': r}
 
 
 def logsumexp(x, y):

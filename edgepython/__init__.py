@@ -5,10 +5,10 @@ edgePython: Python port of the edgeR Bioconductor package.
 Empirical analysis of digital gene expression data in Python.
 """
 
-__version__ = "0.2.6"
+__version__ = "0.5.0"
 
 # --- Classes ---
-from .classes import DGEList, DGEExact, DGEGLM, DGELRT, TopTags
+from .classes import DGEList, DGEExact, DGEGLM, DGELRT, TopTags, PCList, DGEBIN
 from .classes import cbind_dgelist, rbind_dgelist
 from .compressed_matrix import CompressedMatrix
 
@@ -24,7 +24,7 @@ from .dgelist import (
 )
 
 # --- Normalization ---
-from .normalization import calc_norm_factors, normalize_chip_to_input, calc_norm_offsets_for_chip
+from .normalization import calc_norm_factors, norm_lib_sizes, normalize_chip_to_input, calc_norm_offsets_for_chip
 
 # --- Expression ---
 from .expression import cpm, rpkm, tpm, ave_log_cpm, cpm_by_group, rpkm_by_group
@@ -47,6 +47,7 @@ from .dispersion import (
 
 # --- GLM fitting ---
 from .glm_fit import glm_fit, glm_ql_fit, mglm_one_group, mglm_one_way
+from .ql_weights import sample_weights
 
 # --- GLM testing ---
 from .glm_test import glm_lrt, glm_ql_ftest, glm_treat
@@ -69,12 +70,35 @@ from .io import (
     to_anndata,
     read_dge,
     read_10x,
-    catch_salmon,
-    catch_kallisto,
-    catch_rsem,
     feature_counts_to_dgelist,
     read_bismark2dge,
     seurat_to_pb,
+    dgelist_from_tximport,
+    dgelist_from_tximeta,
+)
+from .binomial import (
+    make_pclist,
+    read_bismark2pc,
+    rowsum_pclist,
+    bin_fit,
+    bin_ql_fit,
+    bin_ql_ftest,
+    mbin_one_way,
+    mbin_iwls,
+)
+from .quant_readers import (
+    catch_salmon,
+    catch_salmon_gene,
+    catch_kallisto,
+    catch_kallisto_gene,
+    catch_oarfish,
+    catch_oarfish_gene,
+    catch_rsem,
+    catch_rsem_gene,
+    catch_lr_kallisto,
+    catch_lr_kallisto_gene,
+    split_gencode_tx_names,
+    collapse_gencode_tx2gene,
 )
 
 # --- Visualization ---

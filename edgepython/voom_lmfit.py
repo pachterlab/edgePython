@@ -1,17 +1,10 @@
 # This code was written by Claude (Anthropic). The project was directed by Lior Pachter.
 """voom and voomLmFit-style functionality for edgepython.
 
-This module ports the core limma/edgeR voom pipeline to Python:
-- log-CPM transform
-- optional between-array normalization
-- iterative mean-variance trend fitting via weighted lowess
-- precision-weighted linear model fitting
-- optional sample-weight estimation
-- optional block-correlation estimation and GLS fitting
-- structural-zero handling for sparse rows
-
-This is a pragmatic port intended for end-to-end usability in edgepython,
-including APIs aligned with both `voom` and `voomLmFit` workflows.
+Ports of limma 3.99's voom and voomLmFit and the functions they use:
+lmFit (least squares and GLS with a block correlation), arrayWeights
+(gene-by-gene and REML, with or without prior weights) and
+duplicateCorrelation (REML).
 """
 
 from __future__ import annotations
@@ -20,6 +13,7 @@ from dataclasses import dataclass
 import warnings
 
 import numpy as np
+from numba import njit, prange
 from scipy import linalg as sla
 
 from .glm_fit import glm_fit
@@ -40,6 +34,7 @@ class _FitResult:
     rank: int
     pivot: np.ndarray
     design: np.ndarray
+    stdev_unscaled: np.ndarray = None
 
 
 def _as_array(x, dtype=np.float64):
@@ -138,17 +133,6 @@ def _normalize_between_arrays(y, method="none", cyclic_span=0.7, cyclic_iter=3):
     )
 
 
-def _lib_sizes(counts, lib_size=None):
-    if lib_size is None:
-        lib_size = counts.sum(axis=0)
-    else:
-        lib_size = _as_array(lib_size)
-        if lib_size.shape != (counts.shape[1],):
-            raise ValueError("lib_size must have one entry per sample")
-    lib_size = np.where(lib_size > 0, lib_size, 1.0)
-    return lib_size
-
-
 def _hat_diag(design):
     x = np.asarray(design, dtype=np.float64)
     with np.errstate(invalid="ignore"):
@@ -176,6 +160,7 @@ def _row_lm_fit_with_missing(
             np.full(y_row.shape, np.nan),
             np.nan,
             0,
+            np.full(p, np.nan),
         )
 
     y_obs = y_row[obs]
@@ -260,8 +245,9 @@ def _row_lm_fit_with_missing(
     resid = np.full_like(y_row, np.nan, dtype=np.float64)
     fitted[obs] = fitted_obs
     resid[obs] = resid_obs
+    stdev_unscaled = np.sqrt(np.diag(np.linalg.pinv(xtpx, rcond=1e-12)))
 
-    return beta, fitted, resid, sigma, df
+    return beta, fitted, resid, sigma, df, stdev_unscaled
 
 
 def _lm_fit(y, design, weights=None, block=None, correlation=None):
@@ -286,6 +272,7 @@ def _lm_fit(y, design, weights=None, block=None, correlation=None):
             sigma = np.sqrt(np.sum(resid * resid, axis=1) / df)
         else:
             sigma = np.full(n_genes, np.nan, dtype=np.float64)
+        su = np.sqrt(np.diag(np.linalg.pinv(x.T @ x)))
         return _FitResult(
             coefficients=beta.T,
             fitted_values=fitted,
@@ -295,69 +282,8 @@ def _lm_fit(y, design, weights=None, block=None, correlation=None):
             rank=rank,
             pivot=np.arange(p, dtype=np.int64),
             design=design,
+            stdev_unscaled=np.tile(su, (n_genes, 1)),
         )
-
-    # Fast weighted LS path for common small designs (p=1/2) without correlation/missing.
-    if (
-        weights is not None
-        and (block is None or correlation is None or abs(float(correlation)) < 1e-12)
-        and np.all(np.isfinite(y))
-    ):
-        x = np.asarray(design, dtype=np.float64)
-        rank = int(np.linalg.matrix_rank(x))
-        if rank == x.shape[1] and x.shape[1] in (1, 2):
-            w_mat = _as_matrix_weights(weights, y.shape)
-            w_mat = np.clip(w_mat, _EPS, None)
-            n = y.shape[1]
-            p = x.shape[1]
-            df = int(max(n - rank, 0))
-
-            if p == 1:
-                x0 = x[:, 0]
-                a00 = np.sum(w_mat * (x0[None, :] * x0[None, :]), axis=1)
-                b0 = np.sum(w_mat * (x0[None, :] * y), axis=1)
-                ok = np.abs(a00) > _EPS
-                beta0 = np.full(y.shape[0], np.nan, dtype=np.float64)
-                beta0[ok] = b0[ok] / a00[ok]
-                fitted = beta0[:, None] * x0[None, :]
-                resid = y - fitted
-                if df > 0:
-                    sigma = np.sqrt(np.sum(w_mat * resid * resid, axis=1) / df)
-                else:
-                    sigma = np.full(y.shape[0], np.nan, dtype=np.float64)
-                coef = beta0[:, None]
-            else:
-                x0 = x[:, 0]
-                x1 = x[:, 1]
-                a00 = np.sum(w_mat * (x0[None, :] * x0[None, :]), axis=1)
-                a01 = np.sum(w_mat * (x0[None, :] * x1[None, :]), axis=1)
-                a11 = np.sum(w_mat * (x1[None, :] * x1[None, :]), axis=1)
-                b0 = np.sum(w_mat * (x0[None, :] * y), axis=1)
-                b1 = np.sum(w_mat * (x1[None, :] * y), axis=1)
-                det = a00 * a11 - a01 * a01
-                ok = np.abs(det) > _EPS
-                beta0 = np.full(y.shape[0], np.nan, dtype=np.float64)
-                beta1 = np.full(y.shape[0], np.nan, dtype=np.float64)
-                beta0[ok] = (b0[ok] * a11[ok] - b1[ok] * a01[ok]) / det[ok]
-                beta1[ok] = (b1[ok] * a00[ok] - b0[ok] * a01[ok]) / det[ok]
-                fitted = beta0[:, None] * x0[None, :] + beta1[:, None] * x1[None, :]
-                resid = y - fitted
-                if df > 0:
-                    sigma = np.sqrt(np.sum(w_mat * resid * resid, axis=1) / df)
-                else:
-                    sigma = np.full(y.shape[0], np.nan, dtype=np.float64)
-                coef = np.column_stack([beta0, beta1])
-
-            return _FitResult(
-                coefficients=coef,
-                fitted_values=fitted,
-                residuals=resid,
-                sigma=sigma,
-                df_residual=np.full(y.shape[0], df, dtype=np.int64),
-                rank=rank,
-                pivot=np.arange(p, dtype=np.int64),
-                design=design,
-            )
 
     w_mat = _as_matrix_weights(weights, y.shape) if weights is not None else None
     design_rank = int(np.linalg.matrix_rank(design))
@@ -377,15 +303,56 @@ def _lm_fit(y, design, weights=None, block=None, correlation=None):
                             R[i, j] = r
         r_inv_full = np.linalg.pinv(R, rcond=1e-10)
 
+    # Batched normal equations when every gene has all observations and the
+    # design is of full rank; the per-gene loop below handles the rest.
+    if design_rank == p and np.all(np.isfinite(y)):
+        x = np.asarray(design, dtype=np.float64)
+        w = np.ones_like(y) if w_mat is None else np.clip(w_mat, _EPS, None)
+        if r_inv_full is None:
+            xtpx = np.einsum("gi,ij,ik->gjk", w, x, x)
+            xtpy = np.einsum("gi,ij,gi->gj", w, x, y)
+        else:
+            xs = np.sqrt(w)[:, :, None] * x[None, :, :]
+            ys = np.sqrt(w) * y
+            xr = np.einsum("gip,ij->gpj", xs, r_inv_full)
+            xtpx = np.einsum("gpj,gjq->gpq", xr, xs)
+            xtpy = np.einsum("gpj,gj->gp", xr, ys)
+        xtpx_inv = np.linalg.inv(xtpx)
+        coef = np.einsum("gjk,gk->gj", xtpx_inv, xtpy)
+        fitted = coef @ x.T
+        resid = y - fitted
+        df = n_samples - p
+        if df > 0:
+            if r_inv_full is None:
+                rss = np.sum(w * resid * resid, axis=1)
+            else:
+                rs = np.sqrt(w) * resid
+                rss = np.einsum("gi,ij,gj->g", rs, r_inv_full, rs)
+            sigma = np.sqrt(np.maximum(rss / df, 0.0))
+        else:
+            sigma = np.full(n_genes, np.nan, dtype=np.float64)
+        return _FitResult(
+            coefficients=coef,
+            fitted_values=fitted,
+            residuals=resid,
+            sigma=sigma,
+            df_residual=np.full(n_genes, df, dtype=np.int64),
+            rank=p,
+            pivot=np.arange(p, dtype=np.int64),
+            design=design,
+            stdev_unscaled=np.sqrt(np.einsum("gjj->gj", xtpx_inv)),
+        )
+
     coef = np.empty((n_genes, p), dtype=np.float64)
     fitted = np.empty((n_genes, n_samples), dtype=np.float64)
     resid = np.empty((n_genes, n_samples), dtype=np.float64)
     sigma = np.empty(n_genes, dtype=np.float64)
     df_resid = np.empty(n_genes, dtype=np.int64)
+    su = np.full((n_genes, p), np.nan, dtype=np.float64)
 
     for g in range(n_genes):
         w_row = None if w_mat is None else w_mat[g, :]
-        b, f, r, s, d = _row_lm_fit_with_missing(
+        b, f, r, s, d, su[g, :] = _row_lm_fit_with_missing(
             y[g, :],
             design,
             w_row=w_row,
@@ -412,52 +379,8 @@ def _lm_fit(y, design, weights=None, block=None, correlation=None):
         rank=rank,
         pivot=pivot,
         design=design,
+        stdev_unscaled=su,
     )
-
-
-def _weighted_lowess_trend(sx, sy, span, w, weighted=False):
-    ok = np.isfinite(sx) & np.isfinite(sy) & (sy > 0)
-    if np.sum(ok) < 2:
-        x = np.asarray([0.0, 1.0])
-        y = np.asarray([1.0, 1.0])
-        return x, y
-
-    x = np.asarray(sx[ok], dtype=np.float64)
-    y0 = np.asarray(sy[ok], dtype=np.float64)
-
-    # Use the fast weighted_lowess implementation in both paths.
-    # For the unweighted case, prior weights are set to 1.
-    prior_w = np.clip(w[ok], _EPS, None) if weighted else np.ones_like(x)
-    fit = weighted_lowess(
-        x,
-        y0,
-        weights=prior_w,
-        span=float(span),
-        iterations=4 if weighted else 3,
-        # Fewer seed points materially speeds voom while keeping close agreement.
-        npts=200 if weighted else 120,
-    )
-    y = np.asarray(fit["fitted"], dtype=np.float64)
-    o = np.argsort(x)
-    x = x[o]
-    y = y[o]
-
-    y = np.clip(y, _EPS, None)
-
-    # Ensure strictly non-decreasing x for interpolation.
-    xu, idx = np.unique(x, return_index=True)
-    yu = y[idx]
-    if xu.size < 2:
-        xu = np.array([x[0] - 1.0, x[0] + 1.0], dtype=np.float64)
-        yu = np.array([y[0], y[0]], dtype=np.float64)
-    return xu, yu
-
-
-def _interp_extrap(x, xp, fp):
-    y = np.interp(x, xp, fp)
-    y = np.where(x < xp[0], fp[0], y)
-    y = np.where(x > xp[-1], fp[-1], y)
-    return y
 
 
 def _trimmed_mean(x, trim=0.15):
@@ -465,10 +388,10 @@ def _trimmed_mean(x, trim=0.15):
     x = x[np.isfinite(x)]
     if x.size == 0:
         return np.nan
+    if trim >= 0.5:
+        return float(np.median(x))
     x = np.sort(x)
     k = int(np.floor(trim * x.size))
-    if 2 * k >= x.size:
-        return float(np.mean(x))
     return float(np.mean(x[k : x.size - k]))
 
 
@@ -856,13 +779,11 @@ def array_weights(
         design = _as_array(design)
         if design.ndim != 2 or design.shape[0] != n_samples:
             raise ValueError("design must have one row per sample")
-        q, r, piv = sla.qr(design, mode="economic", pivoting=True)
-        diag = np.abs(np.diag(r))
-        if diag.size:
-            tol_rank = np.max(diag) * max(design.shape) * np.finfo(np.float64).eps
-            rank = int(np.sum(diag > tol_rank))
-            if rank < design.shape[1]:
-                design = design[:, piv[:rank]]
+        # Columns that R's qr() keeps
+        from .dispersion import _independent_columns
+        keep = _independent_columns(design)
+        if len(keep) < design.shape[1]:
+            design = design[:, keep]
 
     if n_samples - design.shape[1] < 2:
         return np.ones(n_samples, dtype=np.float64)
@@ -890,154 +811,380 @@ def array_weights(
 
     if method == "genebygene":
         return _array_weights_genebygene(y, design, wmat, z2, prior_n=float(prior_n))
-    return _array_weights_reml(
-        y, design, z2, prior_n=float(prior_n), maxiter=int(max_iter), tol=float(tol)
-    )
+    if has_na:
+        # As limma: REML uses only the rows without missing values
+        ok = np.all(np.isfinite(y), axis=1)
+        y = y[ok]
+        if wmat is not None:
+            wmat = wmat[ok]
+        if y.shape[0] < 2:
+            return np.ones(n_samples, dtype=np.float64)
+    if wmat is None:
+        return _array_weights_reml(
+            y, design, z2, prior_n=float(prior_n), maxiter=int(max_iter), tol=float(tol)
+        )
+    return _array_weights_prwts_reml(y, design, wmat, z2, prior_n=float(prior_n),
+                                     maxiter=int(max_iter), tol=float(tol))
+
+
+@njit(cache=True)
+def _awreml_gene(yg, design, wg, Z, info2, z):
+    """Add one gene's REML information and score to info2 and z."""
+    narrays, p = design.shape
+    ngam = Z.shape[1] - 1
+    sw = np.sqrt(wg)
+    Q = np.zeros((narrays, p))
+    for k in range(p):
+        v = design[:, k] * sw
+        for _ in range(2):
+            for q in range(k):
+                v = v - np.sum(Q[:, q] * v) * Q[:, q]
+        Q[:, k] = v / np.sqrt(np.sum(v * v))
+    yw = yg * sw
+    rw = yw.copy()
+    for k in range(p):
+        rw = rw - np.sum(Q[:, k] * yw) * Q[:, k]
+    s2 = np.sum(rw * rw) / (narrays - p)
+    # Pairwise products of the columns of Q, off-diagonal ones times sqrt(2)
+    p2 = p * (p + 1) // 2
+    Q2 = np.empty((narrays, p2))
+    j0 = 0
+    for k in range(p):
+        for i in range(p - k):
+            Q2[:, j0 + i] = Q[:, i] * Q[:, i + k] * (np.sqrt(2.0) if k > 0 else 1.0)
+        j0 += p - k
+    h = np.zeros(narrays)
+    for i in range(p):
+        h = h + Q2[:, i]
+    info = (Z * (1.0 - 2.0 * h).reshape(-1, 1)).T @ Z
+    QZ = Q2.T @ Z
+    info = info + QZ.T @ QZ
+    for a in range(ngam):
+        for b in range(ngam):
+            info2[a, b] += info[a + 1, b + 1] - info[a + 1, 0] / info[0, 0] * info[0, b + 1]
+    if s2 > 1e-15:
+        for j in range(narrays):
+            z[j] += rw[j] * rw[j] / s2 - (1.0 - h[j])
+
+
+@njit(cache=True, parallel=True)
+def _awreml_genes(y, design, weights, w, Z):
+    """Per-gene REML information and score sums for array weights with
+    prior weights (limma's awremlfit loop over genes)."""
+    ngenes, narrays = y.shape
+    ngam = Z.shape[1] - 1
+    info2_g = np.zeros((ngenes, ngam, ngam))
+    z_g = np.zeros((ngenes, narrays))
+    for g in prange(ngenes):
+        _awreml_gene(y[g], design, w * weights[g], Z, info2_g[g], z_g[g])
+    return info2_g.sum(axis=0), z_g.sum(axis=0)
+
+
+def _array_weights_prwts_reml(y, design, weights, z2, prior_n=10.0, maxiter=50, tol=1e-5):
+    """REML array weights given prior observation weights.
+
+    Port of limma's .arrayWeightsPrWtsREML: Fisher scoring for log-linear
+    array variances, w = exp(-Z2 gam), with a prior of prior_n arrays.
+    """
+    ngenes, narrays = y.shape
+    Z = np.column_stack([np.ones(narrays), z2])
+    ngam = z2.shape[1]
+    gam = np.zeros(ngam)
+    w = np.ones(narrays)
+    for it in range(1, int(maxiter) + 1):
+        info2, z = _awreml_genes(np.ascontiguousarray(y), np.ascontiguousarray(design),
+                                 np.ascontiguousarray(weights), w, np.ascontiguousarray(Z))
+        info2 = (prior_n * z2.T @ z2 + info2) / (ngenes + prior_n)
+        z = (prior_n * (w - 1) + z) / (ngenes + prior_n)
+        dl = z2.T @ z
+        gamstep = np.linalg.solve(info2, dl)
+        gam = gam + gamstep
+        w = np.exp(z2 @ (-gam))
+        convcrit = float(dl @ gamstep) / (ngenes + prior_n) / ngam
+        if not np.isfinite(convcrit):
+            warnings.warn("convergence tolerance not achievable, stopping prematurely")
+            break
+        if convcrit < tol:
+            break
+        if it == maxiter:
+            warnings.warn("iteration limit reached")
+    return w
+
+
+@njit(cache=True)
+def _gammadev(y, mu):
+    dev = 0.0
+    for i in range(y.shape[0]):
+        if mu[i] < 0.0 or not np.isfinite(mu[i]):
+            return np.inf
+        if y[i] < 1e-15 and mu[i] < 1e-15:
+            continue
+        if mu[i] <= 0.0:
+            return np.inf
+        dev += (y[i] - mu[i]) / mu[i] - np.log(y[i] / mu[i])
+    return 2.0 * dev
+
+
+@njit(cache=True)
+def _gammafit(d, y, beta0, beta1):
+    """Identity-link gamma GLM, mean beta0 + beta1 d, by damped IRLS (limma's
+    gammafit in dupcor.c). Returns (beta0, beta1, ok)."""
+    n = d.shape[0]
+    if np.max(y) == 0.0:
+        return 0.0, 0.0, True
+    mu = beta0 + beta1 * d
+    dev = _gammadev(y, mu)
+    lam = 0.0
+    for it in range(1, 22):
+        b0_old, b1_old, dev_old = beta0, beta1, dev
+        maxmu = np.max(mu)
+        maxv = np.max(mu * mu)
+        floor_v = maxv / 1000.0
+        a = b = c = s0 = s1 = 0.0
+        for i in range(n):
+            v = max(mu[i] * mu[i], floor_v)
+            if v <= 0.0 or not np.isfinite(v):
+                return beta0, beta1, False
+            iv = 1.0 / v
+            r = y[i] - mu[i]
+            a += iv
+            b += d[i] * iv
+            c += d[i] * d[i] * iv
+            s0 += r * iv
+            s1 += d[i] * r * iv
+        maxinfo = max(a, c)
+        if it == 1:
+            lam = abs((a + c) / 2.0) / 2.0
+        lev = 0
+        db0 = db1 = 0.0
+        while True:
+            lev += 1
+            aa = a + lam
+            cc = c + lam
+            det = aa * cc - b * b
+            if det <= 0.0 or not np.isfinite(det):
+                return beta0, beta1, False
+            db0 = (cc * s0 - b * s1) / det
+            db1 = (aa * s1 - b * s0) / det
+            beta0 = b0_old + db0
+            beta1 = b1_old + db1
+            mu = beta0 + beta1 * d
+            dev = _gammadev(y, mu)
+            if dev <= dev_old or dev / maxmu < 1e-15:
+                break
+            if lam / maxinfo > 1e15:
+                return b0_old, b1_old, True
+            lam *= 2.0
+        if lam / maxinfo > 1e15:
+            break
+        if lev == 1:
+            lam /= 10.0
+        if s0 * db0 + s1 * db1 < 1e-6 or dev / maxmu < 1e-15:
+            break
+    return beta0, beta1, np.isfinite(beta0) and np.isfinite(beta1)
+
+
+@njit(cache=True)
+def _dupcor_gene(yv, wv, design, block, nlev):
+    """REML intra-block correlation for one gene (limma's dupcorgene, which
+    reproduces statmod::mixedModel2Fit). NaN if not estimable."""
+    narrays, nbeta = design.shape
+    bmap = np.full(nlev, -1)
+    obs = np.empty(narrays, dtype=np.int64)
+    nobs = 0
+    nblocks = 0
+    for j in range(narrays):
+        if np.isfinite(yv[j]) and np.isfinite(wv[j]):
+            if bmap[block[j]] < 0:
+                bmap[block[j]] = nblocks
+                nblocks += 1
+            obs[nobs] = j
+            nobs += 1
+    if nobs <= nbeta + 2 or nblocks <= 1 or nblocks >= nobs - 1:
+        return np.nan
+    sc = np.empty(nobs)
+    X = np.empty((nobs, nbeta))
+    Z = np.zeros((nobs, nblocks))
+    yw = np.empty(nobs)
+    for i in range(nobs):
+        j = obs[i]
+        sc[i] = np.sqrt(wv[j])
+        for k in range(nbeta):
+            X[i, k] = design[j, k] * sc[i]
+        Z[i, bmap[block[j]]] = 1.0
+        yw[i] = yv[j] * sc[i]
+    # Rank of X by qr()'s rule (a column is dropped if its residual norm is
+    # below 1e-7 of its norm), then an orthonormal basis of its complement
+    basis = np.zeros((nobs, nbeta))
+    rank = 0
+    for k in range(nbeta):
+        v = X[:, k].copy()
+        nv0 = np.sqrt(np.sum(v * v))
+        for _ in range(2):
+            for q in range(rank):
+                v -= np.sum(basis[:, q] * v) * basis[:, q]
+        nv = np.sqrt(np.sum(v * v))
+        if nv0 > 0.0 and nv >= 1e-7 * nv0:
+            basis[:, rank] = v / nv
+            rank += 1
+    mq = nobs - rank
+    if mq == 0:
+        return np.nan
+    if rank > 0:
+        u, sv, vt = np.linalg.svd(basis[:, :rank].copy(), full_matrices=True)
+        Q2 = u[:, rank:].copy()
+    else:
+        Q2 = np.eye(nobs)
+    A = Q2.T @ Z
+    g = Q2.T @ yw
+    ua, sa, vta = np.linalg.svd(A, full_matrices=True)
+    s = min(mq, nblocks)
+    r = ua.T @ g
+    dd = np.zeros(mq)
+    for i in range(s):
+        dd[i] = sa[i] * sa[i]
+    yy = r * r
+    # Moment start (fitlm2)
+    sd = np.sum(dd)
+    sy = np.sum(yy)
+    sdd = np.sum(dd * dd)
+    sdy = np.sum(dd * yy)
+    det = mq * sdd - sd * sd
+    if det <= 2.220446049250313e-16 * max(1.0, mq * sdd):
+        return np.nan
+    beta0 = (sy * sdd - sd * sdy) / det
+    beta1 = (mq * sdy - sd * sy) / det
+    nonzero_d = 0
+    for i in range(mq):
+        if abs(dd[i]) > 1e-15:
+            nonzero_d += 1
+    if mq > 2 and nonzero_d > 1 and (sdd - sd * sd / mq) / (mq - 1) > 1e-15:
+        if np.min(beta0 + beta1 * dd) < 0.0:
+            beta0 = sy / mq
+            beta1 = 0.0
+        beta0, beta1, ok = _gammafit(dd, yy, beta0, beta1)
+        if not ok:
+            return np.nan
+    return beta1 / (beta0 + beta1)
+
+
+@njit(cache=True, parallel=True)
+def _dupcor_all(M, W, design, block, nlev):
+    ngenes = M.shape[0]
+    rho = np.empty(ngenes)
+    for g in prange(ngenes):
+        rho[g] = _dupcor_gene(M[g], W[g], design, block, nlev)
+    return rho
 
 
 def duplicate_correlation(y, design, block, weights=None, trim=0.15):
-    """Estimate consensus intra-block correlation (duplicateCorrelation-style)."""
+    """Consensus intra-block correlation, as limma's duplicateCorrelation.
+
+    Each gene's correlation is the REML estimate of a block random-effect
+    model (statmod::mixedModel2Fit, as limma's C code computes it). They are
+    limited to [1 / (1 - largest block size) + 0.01, 0.99] and averaged on
+    the atanh scale with a trimmed mean. Returns 'consensus_correlation'
+    (also 'cor'), 'atanh_correlations' and the genewise 'correlation'.
+    """
     if block is None:
         return {"consensus_correlation": np.nan, "correlation": np.array([])}
-
-    y = _as_array(y)
+    M = _as_array(y).copy()
+    if M.ndim == 1:
+        M = M.reshape(1, -1)
+    ngenes, narrays = M.shape
+    design = np.ones((narrays, 1)) if design is None else np.asarray(design, dtype=np.float64)
+    if design.ndim == 1:
+        design = design.reshape(-1, 1)
+    if design.shape[0] != narrays:
+        raise ValueError("Number of rows of design matrix does not match number of arrays")
     block = np.asarray(block)
-    if block.shape[0] != y.shape[1]:
+    if block.shape[0] != narrays:
         raise ValueError("block must have one entry per sample")
+    zero = {"consensus_correlation": 0.0, "cor": 0.0, "atanh_correlations": np.zeros(ngenes),
+            "correlation": np.zeros(ngenes)}
 
-    fit = _lm_fit(y, design, weights=weights)
-    r = fit.residuals
-    n_genes, n_samples = r.shape
-    levels = np.unique(block)
+    levels, block_idx = np.unique(block, return_inverse=True)
+    max_block_size = np.max(np.bincount(block_idx))
+    if max_block_size == 1:
+        warnings.warn("Blocks all of size 1: setting intrablock correlation to zero.")
+        return zero
+    # Block factor already encoded in the design?
+    zb = (block_idx[:, None] == np.arange(1, len(levels))[None, :]).astype(np.float64)
+    q, r = np.linalg.qr(design, mode='complete')
+    rank = int(np.sum(np.abs(np.diag(r)) > 1e-7 * np.max(np.abs(np.diag(r))))) if design.size else 0
+    if zb.shape[1] and np.max(np.abs((q.T @ zb)[rank:])) < 1e-8:
+        warnings.warn("Block factor already encoded in the design matrix: setting intrablock correlation to zero.")
+        return zero
 
-    # Fast vectorized path when residual matrix has no missing values.
-    if np.all(np.isfinite(r)):
-        group_idx = [np.where(block == lv)[0] for lv in levels]
-        m = np.array([idx.size for idx in group_idx], dtype=np.float64)
-        present = m > 0
-        m = m[present]
-        group_idx = [group_idx[i] for i in range(len(group_idx)) if present[i]]
-        g_used = len(group_idx)
-        if g_used < 2:
-            return {"consensus_correlation": np.nan, "correlation": np.full(n_genes, np.nan)}
-
-        means = np.column_stack([np.mean(r[:, idx], axis=1) for idx in group_idx])  # genes x groups
-        grand = np.mean(r, axis=1, keepdims=True)
-        ss_between = np.sum(m[None, :] * (means - grand) ** 2, axis=1)
-
-        ss_within = np.zeros(n_genes, dtype=np.float64)
-        for j, idx in enumerate(group_idx):
-            d = r[:, idx] - means[:, j][:, None]
-            ss_within += np.sum(d * d, axis=1)
-
-        n = float(np.sum(m))
-        ms_between = ss_between / (g_used - 1.0)
-        ms_within = ss_within / max(n - g_used, 1.0)
-
-        m_sum = float(np.sum(m))
-        m_sq_sum = float(np.sum(m * m))
-        n0 = (m_sum - (m_sq_sum / m_sum)) / (g_used - 1.0)
-        denom = ms_between + (n0 - 1.0) * ms_within
-
-        gene_corr = np.full(n_genes, np.nan, dtype=np.float64)
-        ok = denom > 0
-        rho = np.empty(n_genes, dtype=np.float64)
-        rho[:] = np.nan
-        rho[ok] = (ms_between[ok] - ms_within[ok]) / denom[ok]
-        gene_corr[ok] = np.clip(rho[ok], -0.99, 0.99)
+    if weights is None:
+        W = np.ones_like(M)
     else:
-        gene_corr = np.full(n_genes, np.nan, dtype=np.float64)
-        for g in range(n_genes):
-            rg = r[g, :]
-            ok = np.isfinite(rg)
-            if np.sum(ok) < 3:
-                continue
-            b = block[ok]
-            v = rg[ok]
-            present = np.unique(b)
-            if present.size < 2:
-                continue
+        W = _as_matrix_weights(weights, M.shape).astype(np.float64).copy()
+        W[W <= 0] = np.nan
+        M[~np.isfinite(W)] = np.nan
 
-            n = 0
-            grand = np.mean(v)
-            ss_within = 0.0
-            ss_between = 0.0
-            m_sum = 0.0
-            m_sq_sum = 0.0
-            groups_used = 0
-            for lv in present:
-                idx = np.where(b == lv)[0]
-                m = idx.size
-                if m == 0:
-                    continue
-                x = v[idx]
-                mu = float(np.mean(x))
-                ss_within += float(np.sum((x - mu) ** 2))
-                ss_between += float(m * (mu - grand) ** 2)
-                n += m
-                m_sum += m
-                m_sq_sum += m * m
-                groups_used += 1
-            if groups_used < 2 or n <= groups_used:
-                continue
-            ms_between = ss_between / (groups_used - 1)
-            ms_within = ss_within / (n - groups_used)
-            n0 = (m_sum - (m_sq_sum / m_sum)) / (groups_used - 1)
-            denom = ms_between + (n0 - 1.0) * ms_within
-            if denom <= 0:
-                continue
-            rho = (ms_between - ms_within) / denom
-            gene_corr[g] = float(np.clip(rho, -0.99, 0.99))
-
-    z = np.arctanh(np.clip(gene_corr[np.isfinite(gene_corr)], -0.99, 0.99))
-    if z.size == 0:
-        consensus = np.nan
-    else:
-        consensus = float(np.tanh(_trimmed_mean(z, trim=trim)))
-    return {"consensus_correlation": consensus, "correlation": gene_corr}
+    rho = _dupcor_all(np.ascontiguousarray(M), np.ascontiguousarray(W), np.ascontiguousarray(design),
+                      block_idx.astype(np.int64), len(levels))
+    rhomin = 1.0 / (1.0 - max_block_size) + 0.01
+    with np.errstate(invalid='ignore'):
+        rho = np.where(rho < rhomin, rhomin, rho)
+        rho = np.where(rho > 0.99, 0.99, rho)
+    arho = np.arctanh(rho)
+    mrho = float(np.tanh(_trimmed_mean(arho, trim=trim)))
+    return {"consensus_correlation": mrho, "cor": mrho, "atanh_correlations": arho,
+            "correlation": rho}
 
 
-def _detect_structural_zeros(counts, design, lib_size, eps=1e-4):
-    h = _hat_diag(design)
-    min_group_size = 1.0 / np.max(h)
-
-    row_has_zero = np.where(np.sum(counts < eps, axis=1) > (max(2.0, min_group_size) - eps))[0]
-    if row_has_zero.size == 0:
-        return row_has_zero, None
-
-    counts_zero = counts[row_has_zero, :]
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            pois = glm_fit(
-                counts_zero,
-                design=design,
-                lib_size=lib_size,
-                dispersion=np.zeros(counts_zero.shape[0], dtype=np.float64),
-                prior_count=0.0,
-            )
-    fitted = pois["fitted.values"]
-    is_zero = (fitted < eps) & (counts_zero < eps)
-    keep = np.where(np.sum(is_zero, axis=1) > eps)[0]
-
-    if keep.size == 0:
-        return np.array([], dtype=np.int64), None
-
-    row_has_exact = row_has_zero[keep]
-    is_zero = is_zero[keep, :]
-    return row_has_exact, is_zero
+def _voom_inputs(counts, design, lib_size, offset, offset_prior):
+    """Counts, design, library sizes, offset and offset.prior from a DGEList
+    or a matrix, as voom and voomLmFit take them."""
+    if isinstance(counts, dict) and 'counts' in counts:
+        dge = counts
+        samples = dge['samples']
+        if design is None and 'group' in samples.columns and len(np.unique(samples['group'])) > 1:
+            from .utils import _model_matrix_group
+            design = _model_matrix_group(np.asarray(samples['group']))
+        if lib_size is None:
+            nf = samples['norm.factors'].to_numpy() if 'norm.factors' in samples.columns else 1.0
+            lib_size = samples['lib.size'].to_numpy() * nf
+        if offset is None:
+            offset = dge.get('offset')
+        if offset_prior is None:
+            offset_prior = dge.get('offset.prior')
+        counts = dge['counts']
+    counts = _validate_counts(counts)
+    design = _validate_design(design, counts.shape[1])
+    lib_size = counts.sum(axis=0) if lib_size is None else _as_array(lib_size)
+    if offset is not None:
+        offset = offset.as_matrix() if hasattr(offset, 'as_matrix') else _as_array(offset)
+    if offset_prior is not None:
+        offset_prior = _as_array(offset_prior)
+        if offset_prior.shape != counts.shape:
+            raise ValueError("counts and offset_prior must have equal dimensions.")
+    return counts, design, lib_size, offset, offset_prior
 
 
-def _compute_voom_weights_from_fit(fit, design, lib_size, trend_x, trend_y):
-    fitted_values = fit.fitted_values
-    fitted_cpm = np.power(2.0, fitted_values)
-    fitted_count = 1e-6 * fitted_cpm * (lib_size[None, :] + 1.0)
-    fitted_logcount = np.log2(np.clip(fitted_count, _EPS, None))
+def _voom_line(sx, sy, span, weights=None):
+    """The mean-variance trend as voom computes it, sorted by x: R's
+    lowess(sx, sy, f = span), or limma's weightedLowess with weights."""
+    if weights is None:
+        from statsmodels.nonparametric.smoothers_lowess import lowess
+        line = lowess(sy, sx, frac=span, it=3, delta=0.01 * np.ptp(sx), is_sorted=False,
+                      return_sorted=True)
+        return line[:, 0], line[:, 1]
+    fitted = weighted_lowess(sx, sy, weights=weights, span=span)["fitted"]
+    o = np.argsort(sx, kind="stable")
+    return sx[o], fitted[o]
 
-    trend = _interp_extrap(fitted_logcount, trend_x, trend_y)
-    trend = np.clip(trend, _EPS, None)
-    w = 1.0 / np.power(trend, 4.0)
-    return w
+
+def _voom_weights(fit, design, lib_matrix, line):
+    """1 / trend(fitted log-count)^4, the trend interpolated by
+    approxfun(rule = 2, ties = mean)."""
+    from .dispersion_lowlevel import _approx_rule2
+    cols = fit.pivot[: fit.rank]
+    fitted = fit.coefficients[:, cols] @ design[:, cols].T
+    fitted_count = 1e-6 * np.power(2.0, fitted) * (lib_matrix + 1.0)
+    return 1.0 / _approx_rule2(line[0], line[1], np.log2(fitted_count)) ** 4
 
 
 def voom(
@@ -1046,7 +1193,7 @@ def voom(
     lib_size=None,
     normalize_method="none",
     span=0.5,
-    adaptive_span=False,
+    adaptive_span=True,
     block=None,
     correlation=None,
     prior_weights=None,
@@ -1057,229 +1204,118 @@ def voom(
     structural_zeros=False,
     save_plot=False,
     keep_elist=True,
+    offset=None,
+    offset_prior=None,
+    weights=None,
 ):
-    """Python port of limma/edgeR voomLmFit pipeline.
+    """Transform counts to log2-CPM with precision weights (limma's voom).
 
-    Parameters broadly follow edgeR::voomLmFit.
+    Port of limma 3.99's voom. The mean-variance trend is R's lowess of
+    sqrt(residual SD) against average log count over genes that are not all
+    zero; each observation's weight is 1 / trend(fitted log count)^4.
+
+    Parameters follow limma's voom; prior_weights is a synonym for weights,
+    which are used in the linear model fit only. The library sizes are
+    exp(log(lib_size) + offset_prior); an offset is converted to an
+    offset_prior by centring each gene. With sample_weights, var_design,
+    var_group or structural_zeros, voom_lmfit's algorithm is used instead.
+
+    Returns a dict with E (log2-CPM), weights, design, lib_size, span,
+    Amean, the initial linear model fit (coefficients, sigma, df_residual,
+    ...) and the trend (trend_x, trend_y).
     """
-    counts = _validate_counts(counts)
+    if weights is None:
+        weights = prior_weights
+    if sample_weights or var_design is not None or var_group is not None or structural_zeros:
+        return voom_lmfit(counts, design=design, block=block, prior_weights=weights,
+                          sample_weights=sample_weights, var_design=var_design,
+                          var_group=var_group, prior_n=prior_n, lib_size=lib_size,
+                          offset=offset, offset_prior=offset_prior,
+                          normalize_method=normalize_method, span=span,
+                          adaptive_span=adaptive_span, save_plot=save_plot,
+                          keep_elist=keep_elist)
+
+    counts, design, lib_size, offset, offset_prior = _voom_inputs(
+        counts, design, lib_size, offset, offset_prior)
     n_genes, n_samples = counts.shape
-
-    design = _validate_design(design, n_samples)
-    lib_size = _lib_sizes(counts, lib_size=lib_size)
-
-    prior_w = _as_matrix_weights(prior_weights, counts.shape) if prior_weights is not None else None
-
-    sample_weights_flag = bool(sample_weights) or (var_design is not None) or (var_group is not None)
-    if (prior_w is not None) and sample_weights_flag:
-        raise ValueError("Can't specify prior_weights and estimate sample weights")
+    lib_matrix = np.tile(lib_size, (n_genes, 1))
+    if offset is not None:
+        if offset_prior is None:
+            if offset.shape != counts.shape:
+                raise ValueError("counts and offset must have equal dimensions.")
+            offset_prior = offset - offset.mean(axis=1, keepdims=True)
+        else:
+            warnings.warn("Ignoring offset in favor of offset_prior. Should not set both.")
+    if offset_prior is not None:
+        lib_matrix = np.exp(np.log(lib_matrix) + offset_prior)
 
     if adaptive_span:
         span = choose_lowess_span(n_genes, small_n=50, min_span=0.3, power=1 / 3)
 
-    y = np.log2((counts + 0.5) / (lib_size[None, :] + 1.0) * 1e6)
+    y = np.log2((counts + 0.5) / (lib_matrix + 1.0) * 1e6)
     y = _normalize_between_arrays(y, method=normalize_method)
-
+    prior_w = _as_matrix_weights(weights, counts.shape) if weights is not None else None
     fit = _lm_fit(y, design, weights=prior_w, block=block, correlation=correlation)
-
-    # Structural zeros: mask exact zeros and refit those rows.
-    if structural_zeros:
-        row_zero, is_zero = _detect_structural_zeros(counts, design, lib_size)
-    else:
-        row_zero, is_zero = np.array([], dtype=np.int64), None
-    y_na_short = None
-    if row_zero.size > 0:
-        y_na_short = y[row_zero, :].copy()
-        y_na_short[is_zero] = np.nan
-        w_short = None if prior_w is None else prior_w[row_zero, :]
-        fit_na = _lm_fit(
-            y_na_short,
-            design,
-            weights=w_short,
-            block=block,
-            correlation=correlation,
-        )
-        fit.df_residual[row_zero] = fit_na.df_residual
-        fit.sigma[row_zero] = fit_na.sigma
-
-    has_rep = fit.df_residual > 0
-    n_rep = int(np.sum(has_rep))
-    if n_rep < 2:
-        w = np.ones_like(y)
-        out = {
-            "E": y,
-            "weights": w,
-            "design": design,
-            "coefficients": fit.coefficients,
-            "fitted": fit.fitted_values,
-            "residuals": fit.residuals,
-            "sigma": fit.sigma,
-            "df_residual": fit.df_residual,
-            "Amean": np.nanmean(y, axis=1),
-            "lib_size": lib_size,
-            "span": float(span),
-        }
-        return out
-
-    amean = np.nanmean(y, axis=1)
-    amean2 = amean.copy()
-    if y_na_short is not None:
-        amean2[row_zero] = np.nanmean(y_na_short, axis=1)
-
-    sx = amean2[has_rep] + np.mean(np.log2(lib_size + 1.0)) - np.log2(1e6)
-    sy = np.sqrt(np.clip(fit.sigma[has_rep], _EPS, None))
-
-    any_zero_rows = y_na_short is not None
-    trend_x, trend_y = _weighted_lowess_trend(
-        sx,
-        sy,
-        span=float(span),
-        w=np.clip(fit.df_residual[has_rep], 1, None),
-        weighted=any_zero_rows,
-    )
-
-    w_voom = _compute_voom_weights_from_fit(fit, design, lib_size, trend_x, trend_y)
-
-    if prior_w is not None:
-        weights = w_voom * prior_w
-    else:
-        weights = w_voom
-
-    # First sample weight / correlation pass.
-    sw = None
-    if sample_weights_flag:
-        y_for_sw = y.copy()
-        if y_na_short is not None:
-            y_for_sw[row_zero, :] = y_na_short
-        sw = array_weights(
-            y_for_sw,
-            design,
-            weights,
-            var_design=var_design,
-            var_group=var_group,
-            prior_n=float(prior_n),
-        )
-        if block is not None:
-            weights = weights * sw[None, :]
-
-    corr = correlation
-    if block is not None and corr is None:
-        y_for_corr = y.copy()
-        if y_na_short is not None:
-            y_for_corr[row_zero, :] = y_na_short
-        dc = duplicate_correlation(y_for_corr, design, block, weights=weights)
-        corr = dc["consensus_correlation"]
-        if not np.isfinite(corr):
-            corr = 0.0
-
-    # Second iteration if sample/block modeling requested.
-    if (block is not None) or sample_weights_flag:
-        if sample_weights_flag and sw is not None:
-            base_weights = np.repeat(sw[None, :], n_genes, axis=0)
-        else:
-            base_weights = prior_w
-
-        fit2 = _lm_fit(y, design, weights=base_weights, block=block, correlation=corr)
-        if y_na_short is not None:
-            w_short = None if base_weights is None else base_weights[row_zero, :]
-            fit2_na = _lm_fit(
-                y_na_short,
-                design,
-                weights=w_short,
-                block=block,
-                correlation=corr,
-            )
-            fit2.df_residual[row_zero] = fit2_na.df_residual
-            fit2.sigma[row_zero] = fit2_na.sigma
-
-        sy2 = np.sqrt(np.clip(fit2.sigma[has_rep], _EPS, None))
-        trend_x, trend_y = _weighted_lowess_trend(
-            sx,
-            sy2,
-            span=float(span),
-            w=np.clip(fit2.df_residual[has_rep], 1, None),
-            weighted=any_zero_rows,
-        )
-
-        w_voom = _compute_voom_weights_from_fit(fit2, design, lib_size, trend_x, trend_y)
-        if prior_w is not None:
-            weights = w_voom * prior_w
-        else:
-            weights = w_voom
-
-        if sample_weights_flag:
-            y_for_sw = y.copy()
-            if y_na_short is not None:
-                y_for_sw[row_zero, :] = y_na_short
-            sw = array_weights(
-                y_for_sw,
-                design,
-                weights,
-                var_design=var_design,
-                var_group=var_group,
-                prior_n=float(prior_n),
-            )
-            weights = weights * sw[None, :]
-
-        if block is not None:
-            y_for_corr = y.copy()
-            if y_na_short is not None:
-                y_for_corr[row_zero, :] = y_na_short
-            dc2 = duplicate_correlation(y_for_corr, design, block, weights=weights)
-            corr_new = dc2["consensus_correlation"]
-            if np.isfinite(corr_new):
-                corr = corr_new
-            else:
-                corr = 0.0
-
-    # Final fit with final voom weights.
-    fit_final = _lm_fit(y, design, weights=weights, block=block, correlation=corr)
-    if y_na_short is not None:
-        fit_final_na = _lm_fit(
-            y_na_short,
-            design,
-            weights=weights[row_zero, :],
-            block=block,
-            correlation=corr,
-        )
-        fit_final.df_residual[row_zero] = fit_final_na.df_residual
-        fit_final.sigma[row_zero] = fit_final_na.sigma
-
+    amean = np.mean(y, axis=1)
     out = {
-        "coefficients": fit_final.coefficients,
-        "fitted": fit_final.fitted_values,
-        "residuals": fit_final.residuals,
-        "sigma": fit_final.sigma,
-        "df_residual": fit_final.df_residual,
-        "design": design,
-        "weights": weights,
-        "E": y,
-        "Amean": amean,
-        "lib_size": lib_size,
-        "span": float(span),
-        "correlation": corr,
-        "sample_weights": sw,
-        "trend_x": trend_x,
-        "trend_y": trend_y,
+        "E": y, "design": design, "lib_size": lib_size, "span": float(span), "Amean": amean,
+        "coefficients": fit.coefficients, "stdev_unscaled": fit.stdev_unscaled,
+        "fitted": fit.fitted_values, "residuals": fit.residuals, "sigma": fit.sigma,
+        "df_residual": fit.df_residual, "offset_prior": offset_prior,
+        # Kept from earlier edgePython versions; voom_lmfit sets sample_weights
+        "correlation": correlation, "sample_weights": None,
     }
 
+    n_with_reps = int(np.sum(fit.df_residual > 0))
+    if n_with_reps < 2:
+        warnings.warn("The experimental design has no replication. Setting weights to 1."
+                      if n_with_reps == 0 else
+                      "Only one gene with any replication. Setting weights to 1.")
+        out["weights"] = np.ones_like(y)
+        return out
+
+    sx = amean + np.mean(np.log2(lib_size + 1.0)) - np.log2(1e6)
+    sy = np.sqrt(fit.sigma)
+    keep = counts.sum(axis=1) != 0
+    line = _voom_line(sx[keep], sy[keep], span)
+    out["weights"] = _voom_weights(fit, design, lib_matrix, line)
+    out["trend_x"], out["trend_y"] = line
     if save_plot:
-        out["voom_xy"] = {
-            "x": sx,
-            "y": sy,
-            "xlab": "log2( count size + 0.5 )",
-            "ylab": "Sqrt( standard deviation )",
-        }
-        out["voom_line"] = {"x": trend_x, "y": trend_y}
-
+        out["voom_xy"] = {"x": sx[keep], "y": sy[keep], "xlab": "log2( count size + 0.5 )",
+                          "ylab": "Sqrt( standard deviation )"}
+        out["voom_line"] = {"x": line[0], "y": line[1]}
     if keep_elist:
-        out["EList"] = {
-            "E": y,
-            "weights": weights,
-            "genes": None,
-        }
-
+        out["EList"] = {"E": y, "weights": out["weights"], "genes": None}
     return out
+
+
+def _structural_zeros(counts, design, lib_size, eps=1e-4):
+    """Rows with exact zeros that the design fits as zero, as voomLmFit
+    finds them: rows with more zeros than the smallest group size (at least
+    2) and a Poisson fit below eps where the count is below eps.
+    Returns (row indices, is_zero matrix for those rows)."""
+    min_group_size = 1.0 / np.max(_hat_diag(design))
+    rows = np.flatnonzero(np.sum(counts < eps, axis=1) > (max(2.0, min_group_size) - eps))
+    if rows.size == 0:
+        return rows, None
+    counts_zero = counts[rows]
+    fitted = glm_fit(counts_zero, design=design, offset=np.log(lib_size), dispersion=0.0,
+                     prior_count=0)["fitted.values"]
+    is_zero = (fitted < eps) & (counts_zero < eps)
+    exact = np.flatnonzero(np.sum(is_zero, axis=1) > eps)
+    return rows[exact], is_zero[exact]
+
+
+def _fit_with_zeros(y, design, weights, block, correlation, rows, y_na_short):
+    """lmFit on y, with df.residual and sigma of the structural-zero rows
+    from a fit that treats their zeros as missing."""
+    fit = _lm_fit(y, design, weights=weights, block=block, correlation=correlation)
+    if rows.size:
+        fit_na = _lm_fit(y_na_short, design, weights=None if weights is None else weights[rows],
+                         block=block, correlation=correlation)
+        fit.df_residual[rows] = fit_na.df_residual
+        fit.sigma[rows] = fit_na.sigma
+    return fit
 
 
 def voom_lmfit(
@@ -1294,29 +1330,135 @@ def voom_lmfit(
     lib_size=None,
     normalize_method="none",
     span=0.5,
-    adaptive_span=False,
+    adaptive_span=True,
     save_plot=False,
     keep_elist=True,
+    offset=None,
+    offset_prior=None,
 ):
-    """Alias-style API matching edgeR::voomLmFit argument names."""
-    return voom(
-        counts=counts,
-        design=design,
-        lib_size=lib_size,
-        normalize_method=normalize_method,
-        span=span,
-        adaptive_span=adaptive_span,
-        block=block,
-        correlation=None,
-        prior_weights=prior_weights,
-        sample_weights=sample_weights,
-        var_design=var_design,
-        var_group=var_group,
-        prior_n=prior_n,
-        structural_zeros=True,
-        save_plot=save_plot,
-        keep_elist=keep_elist,
-    )
+    """voom followed by a linear model fit (limma's voomLmFit).
+
+    Port of limma 3.99's voomLmFit. Exact zeros that the design fits as
+    zero are treated as missing when estimating each gene's residual SD
+    (and the trend then uses weightedLowess with the residual df as
+    weights). With sample_weights (or var_design / var_group) array weights
+    are estimated, and with block an intra-block correlation; both are
+    estimated twice, with the voom weights updated in between.
+
+    Returns a dict with the final fit (coefficients, stdev_unscaled, sigma,
+    df_residual, Amean), the weights, E, sample_weights, correlation and
+    the trend.
+    """
+    counts, design, lib_size, offset, offset_prior = _voom_inputs(
+        counts, design, lib_size, offset, offset_prior)
+    G, n = counts.shape
+    use_block = block is not None
+    use_sw = bool(sample_weights) or var_design is not None or var_group is not None
+    if prior_weights is not None and use_sw:
+        raise ValueError("Can't specify prior_weights and estimate sample weights")
+    if offset is None:
+        lib_matrix = np.tile(lib_size, (G, 1))
+        if offset_prior is not None:
+            lib_matrix = np.exp(np.log(lib_matrix) + offset_prior)
+    else:
+        if offset.ndim == 2 and offset.shape != counts.shape:
+            raise ValueError("counts and offset must have equal dimensions")
+        if offset.ndim == 1 and offset.shape[0] != n:
+            raise ValueError("if offset is a vector, its length must be the number of samples")
+        lib_matrix = np.exp(np.broadcast_to(offset, counts.shape))
+    prior_w = _as_matrix_weights(prior_weights, counts.shape) if prior_weights is not None else None
+    if adaptive_span:
+        span = choose_lowess_span(G, small_n=50, min_span=0.3, power=1 / 3)
+
+    y = np.log2((counts + 0.5) / (lib_matrix + 1.0) * 1e6)
+    y = _normalize_between_arrays(y, method=normalize_method)
+
+    rows, is_zero = _structural_zeros(counts, design, lib_size)
+    y_na_short = y_na_full = None
+    if rows.size:
+        y_na_short = y[rows].copy()
+        y_na_short[is_zero] = np.nan
+        y_na_full = y.copy()
+        y_na_full[rows] = y_na_short
+    any_zero_rows = rows.size > 0
+    fit = _fit_with_zeros(y, design, prior_w, None, None, rows, y_na_short)
+
+    has_rep = fit.df_residual > 0
+    if int(np.sum(has_rep)) < 2:
+        warnings.warn("The experimental design has no replication. Setting weights to 1."
+                      if not np.any(has_rep) else
+                      "Only one gene with any replication. Setting weights to 1.")
+        return {"coefficients": fit.coefficients, "stdev_unscaled": fit.stdev_unscaled,
+                "sigma": fit.sigma, "df_residual": fit.df_residual, "design": design,
+                "weights": np.ones_like(y), "E": y, "Amean": np.mean(y, axis=1),
+                "lib_size": lib_size, "span": float(span), "correlation": None,
+                "sample_weights": None}
+
+    amean = np.mean(y, axis=1)
+    amean2 = amean.copy()
+    if any_zero_rows:
+        amean2[rows] = np.nanmean(y_na_short, axis=1)
+    sx = amean2[has_rep] + np.mean(np.log2(lib_size + 1.0)) - np.log2(1e6)
+
+    def trend_weights(fit):
+        sy = np.sqrt(fit.sigma[has_rep])
+        line = _voom_line(sx, sy, span,
+                          weights=fit.df_residual[has_rep].astype(np.float64) if any_zero_rows else None)
+        w = _voom_weights(fit, design, lib_matrix, line)
+        return (w * prior_w if prior_w is not None else w), line, sy
+
+    weights, line, sy = trend_weights(fit)
+    y_for_estimates = y_na_full if any_zero_rows else y
+    aw_method = "genebygene" if any_zero_rows else "reml"
+    sw = None
+    correlation = None
+    if use_sw:
+        sw = array_weights(y_for_estimates, design, weights=weights, var_design=var_design,
+                           var_group=var_group, prior_n=prior_n, method=aw_method)
+        if use_block:
+            weights = weights * sw[None, :]
+    if use_block:
+        correlation = duplicate_correlation(y_for_estimates, design, block,
+                                            weights=weights)["consensus_correlation"]
+        if not np.isfinite(correlation):
+            warnings.warn("Intra-block correlation not estimable, setting to zero.")
+            correlation = 0.0
+        if correlation == 0.0:
+            use_block = False
+
+    if use_block or use_sw:
+        base = np.tile(sw, (G, 1)) if use_sw else prior_w
+        fit = _fit_with_zeros(y, design, base, block if use_block else None, correlation,
+                              rows, y_na_short)
+        weights, line, sy = trend_weights(fit)
+        if use_sw:
+            sw = array_weights(y_for_estimates, design, weights=weights, var_design=var_design,
+                               var_group=var_group, prior_n=prior_n, method=aw_method)
+            weights = weights * sw[None, :]
+        if use_block:
+            correlation = duplicate_correlation(y_for_estimates, design, block,
+                                                weights=weights)["consensus_correlation"]
+            if not np.isfinite(correlation):
+                warnings.warn("Intra-block correlation not estimable, setting to zero.")
+                correlation = 0.0
+
+    final_block = block if use_block else None
+    fit = _fit_with_zeros(y, design, weights, final_block, correlation, rows, y_na_short)
+    out = {
+        "coefficients": fit.coefficients, "stdev_unscaled": fit.stdev_unscaled,
+        "fitted": fit.fitted_values, "residuals": fit.residuals, "sigma": fit.sigma,
+        "df_residual": fit.df_residual, "design": design, "weights": weights, "E": y,
+        "Amean": amean, "lib_size": lib_size, "span": float(span),
+        "correlation": correlation, "sample_weights": sw,
+        "trend_x": line[0], "trend_y": line[1],
+    }
+    if save_plot:
+        out["voom_xy"] = {"x": sx, "y": sy, "xlab": "log2( count size + 0.5 )",
+                          "ylab": "Sqrt( standard deviation )"}
+        out["voom_line"] = {"x": line[0], "y": line[1]}
+    if keep_elist:
+        out["EList"] = {"E": y, "weights": weights, "genes": None}
+    return out
 
 
 def voom_basic(
@@ -1329,43 +1471,24 @@ def voom_basic(
     lowess_iterations=4,
     lowess_npts=200,
 ):
-    """Backward-compatible wrapper around `voom`.
+    """voom with a fixed span (0.5 by default) and optional norm factors.
 
-    This keeps the previous lightweight API while using the same core engine.
-    `norm_factors`, `prior_count`, `lowess_iterations`, and `lowess_npts` are
-    accepted for compatibility; the current implementation applies voom's
-    canonical prior_count=0.5 and weighted_lowess defaults.
+    Backward-compatible wrapper around `voom`; prior_count,
+    lowess_iterations and lowess_npts are accepted for compatibility and
+    ignored (voom uses 0.5 and R's lowess).
     """
     counts = _validate_counts(counts)
-
     if norm_factors is not None:
         norm_factors = _as_array(norm_factors)
         if norm_factors.shape != (counts.shape[1],):
             raise ValueError("norm_factors must have one entry per sample")
-
     if lib_size is None:
         lib_size = counts.sum(axis=0)
-
     if norm_factors is not None:
         lib_size = lib_size * norm_factors
-
     if prior_count <= 0:
         raise ValueError("prior_count must be positive")
-
-    out = voom(
-        counts=counts,
-        design=design,
-        lib_size=lib_size,
-        normalize_method="none",
-        span=0.5 if span is None else float(span),
-        adaptive_span=False,
-        prior_weights=None,
-        sample_weights=False,
-        structural_zeros=False,
-        save_plot=False,
-        keep_elist=False,
-    )
-
-    # Preserve old return keys.
-    out["trend_fitted"] = _interp_extrap(out["trend_x"], out["trend_x"], out["trend_y"])
+    out = voom(counts, design=design, lib_size=lib_size, span=0.5 if span is None else float(span),
+               adaptive_span=False, keep_elist=False)
+    out["trend_fitted"] = out["trend_y"]
     return out

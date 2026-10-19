@@ -9,16 +9,17 @@ estimateGLMTagwiseDisp, and WLEB.
 
 import numpy as np
 import warnings
-from scipy.optimize import minimize_scalar
 
 from .expression import ave_log_cpm
+from .compressed_matrix import CompressedMatrix
 from .utils import (expand_as_matrix, moving_average_by_col, cut_with_min_n,
-                    drop_empty_levels, systematic_subset)
+                    drop_empty_levels, systematic_subset, optimize_brent)
 from .smoothing import locfit_by_col, loess_by_col
 from .limma_port import squeeze_var, choose_lowess_span
 from .dispersion_lowlevel import (
     adjusted_profile_lik, adjusted_profile_lik_grid, maximize_interpolant,
     cond_log_lik_der_delta, common_cond_log_lik_der_delta, _cond_log_lik_grid,
+    _trend_from_bins,
     disp_cox_reid, disp_cox_reid_interpolate_tagwise,
     disp_cox_reid_spline_trend, disp_cox_reid_power_trend,
     disp_bin_trend, disp_pearson, disp_deviance
@@ -44,12 +45,26 @@ def _independent_columns(design, tol=1e-7):
     return keep
 
 
+def _offset_repeats_rows(offset):
+    """Whether edgeR would store the offset with repeated rows.
+
+    True for a scalar, a vector or a 1 x nlibs matrix (the same offsets for
+    every gene), as in edgeR's makeCompressedMatrix; a full matrix counts as
+    genewise even if its rows are equal.
+    """
+    if isinstance(offset, CompressedMatrix):
+        return bool(offset.repeat_row)
+    offset = np.asarray(offset)
+    return offset.ndim < 2 or offset.shape[0] == 1
+
+
 def _apl_grid_by_zero_pattern(grid_dispersions, y, design, offset, weights):
     """Adjusted profile likelihood on the grid, as in edgeR's estimateDisp.
 
     edgeR groups genes by which libraries are fitted as exact zeros, drops
     those libraries, reduces the design to its independent columns, and
     leaves the APL at zero for groups whose reduced design is saturated.
+    Each grid point's fit starts from the previous point's coefficients.
     """
     from .glm_fit import glm_fit
 
@@ -69,10 +84,15 @@ def _apl_grid_by_zero_pattern(grid_dispersions, y, design, offset, weights):
             if redesign.shape[0] == redesign.shape[1]:
                 continue
         rows = np.flatnonzero(group.reshape(-1) == k)
-        l0[rows] = adjusted_profile_lik_grid(
-            grid_dispersions, y[np.ix_(rows, nonzero)], redesign,
-            offset[np.ix_(rows, nonzero)],
-            weights=weights[np.ix_(rows, nonzero)])
+        cur_y = y[np.ix_(rows, nonzero)]
+        cur_offset = offset[np.ix_(rows, nonzero)]
+        cur_weights = weights[np.ix_(rows, nonzero)]
+        last_beta = None
+        for i, disp in enumerate(grid_dispersions):
+            out = adjusted_profile_lik(disp, cur_y, redesign, cur_offset, weights=cur_weights,
+                                       start=last_beta, get_coef=True)
+            l0[rows, i] = out['apl']
+            last_beta = out['beta']
     return l0
 
 
@@ -155,6 +175,10 @@ def estimate_disp(y, design=None, group=None, lib_size=None, offset=None,
     # DGEList input
     if isinstance(y, dict) and 'counts' in y:
         dge = y
+        if weights is not None:
+            # Weights given explicitly act as the DGEList's own weights
+            dge = type(dge)(dge)
+            dge['weights'] = weights
         from .dgelist import valid_dgelist, get_offset
         dge = valid_dgelist(dge)
         group_val = dge['samples']['group'].values
@@ -211,9 +235,13 @@ def estimate_disp(y, design=None, group=None, lib_size=None, offset=None,
     if np.any(~np.isfinite(lib_size)) or np.any(lib_size <= 0):
         raise ValueError("library sizes must be positive finite values")
 
-    # Build offset
+    # Build offset. As in edgeR 5.0, the classic model is used only without
+    # a design and with the same offsets for every gene (none, or a vector).
     if offset is None:
         offset = np.log(lib_size)
+    classic = design is None and _offset_repeats_rows(offset)
+    if isinstance(offset, CompressedMatrix):
+        offset = offset.as_matrix()
     offset = np.asarray(offset, dtype=np.float64)
     offset_mat = expand_as_matrix(offset, y.shape)
 
@@ -234,7 +262,17 @@ def estimate_disp(y, design=None, group=None, lib_size=None, offset=None,
     grid_vals = spline_disp / (1 + spline_disp)
     l0 = np.zeros((np.sum(sel), grid_length))
 
-    if design is None:
+    if design is None and not classic:
+        # Genewise offsets without a design: edgeR 5.0 no longer uses the
+        # classic model (which ignores offsets) but then fails for want of
+        # a design. Use the design the classic model would have used.
+        if len(np.unique(group)) == 1:
+            design = np.ones((nlibs, 1))
+        else:
+            from .utils import _model_matrix_group
+            design = _model_matrix_group(group)
+
+    if classic:
         # Classic edgeR approach
         unique_groups = np.unique(group)
         if np.all(np.bincount(group.astype(int) if np.issubdtype(group.dtype, np.integer) else
@@ -244,11 +282,12 @@ def estimate_disp(y, design=None, group=None, lib_size=None, offset=None,
                     'trended.dispersion': np.nan,
                     'tagwise.dispersion': np.nan}
 
+        # The classic design is also used for the prior df below
         if len(unique_groups) == 1:
-            design_classic = np.ones((nlibs, 1))
+            design = np.ones((nlibs, 1))
         else:
             from .utils import _model_matrix_group
-            design_classic = _model_matrix_group(group)
+            design = _model_matrix_group(group)
 
         # Equalize library sizes and estimate common dispersion
         from .exact_test import equalize_lib_sizes, split_into_groups
@@ -256,11 +295,9 @@ def estimate_disp(y, design=None, group=None, lib_size=None, offset=None,
         y_pseudo = eq['pseudo.counts'][sel]
         y_split = split_into_groups(y_pseudo, group=group)
 
-        # Optimize common dispersion
-        result = minimize_scalar(
-            lambda d: -common_cond_log_lik_der_delta(y_split, d, der=0),
-            bounds=(1e-4, 100 / 101), method='bounded')
-        delta = result.x
+        # Optimize common dispersion with R's optimize(), as edgeR does
+        delta = optimize_brent(lambda d: -common_cond_log_lik_der_delta(y_split, d, der=0),
+                               1e-4, 100 / 101, tol=tol)
         disp = delta / (1 - delta)
 
         # Re-equalize
@@ -319,10 +356,7 @@ def estimate_disp(y, design=None, group=None, lib_size=None, offset=None,
     # Calculate prior_df
     if prior_df is None:
         from .glm_fit import glm_fit
-        if design is None:
-            design_fit = np.ones((nlibs, 1))
-        else:
-            design_fit = design
+        design_fit = design
         glmfit = glm_fit(sely, offset=seloffset, weights=selweights,
                          design=design_fit, dispersion=disp_trend, prior_count=0)
 
@@ -341,7 +375,7 @@ def estimate_disp(y, design=None, group=None, lib_size=None, offset=None,
                              robust=robust, winsor_tail_p=winsor_tail_p)
         prior_df = s2_fit.get('df.prior', s2_fit.get('df_prior'))
 
-    ncoefs = design.shape[1] if design is not None else 1
+    ncoefs = design.shape[1]
     prior_n = prior_df / (nlibs - ncoefs)
 
     # Initiate tagwise dispersions
@@ -361,7 +395,12 @@ def estimate_disp(y, design=None, group=None, lib_size=None, offset=None,
                       covariate=ave_lcpm[sel] if ave_lcpm is not None else None,
                       trend_method=trend_method, span=span, legacy_span=False,
                       overall=False, trend=False, m0=m0)
-        tagwise_dispersion[sel] = 0.1 * 2 ** out_2['individual']
+        if not robust:
+            tagwise_dispersion[sel] = 0.1 * 2 ** out_2['individual']
+        else:
+            # Genes with prior.n > 1e6 keep their trended dispersion
+            keep = ~np.broadcast_to(too_large, out_2['individual'].shape)
+            tagwise_dispersion[np.flatnonzero(sel)[keep]] = 0.1 * 2 ** out_2['individual'][keep]
 
     if robust:
         temp_df = prior_df
@@ -563,11 +602,8 @@ def estimate_common_disp(y, group=None, lib_size=None, tol=1e-6,
         y_pseudo = eq['pseudo.counts']
         y_split = split_into_groups(y_pseudo, group=group)
 
-        result = minimize_scalar(
-            lambda d: -common_cond_log_lik_der_delta(y_split, d, der=0),
-            bounds=(1e-4, 100 / 101), method='bounded',
-            options={'xatol': tol})
-        delta = result.x
+        delta = optimize_brent(lambda d: -common_cond_log_lik_der_delta(y_split, d, der=0),
+                               1e-4, 100 / 101, tol=tol)
         disp = delta / (1 - delta)
 
     if verbose:
@@ -579,7 +615,7 @@ def estimate_common_disp(y, group=None, lib_size=None, tol=1e-6,
 def estimate_tagwise_disp(y, group=None, lib_size=None, dispersion=None,
                            prior_df=10, trend='movingave', span=None,
                            method='grid', grid_length=11, grid_range=(-6, 6),
-                           tol=1e-6, verbose=False):
+                           tol=1e-6, verbose=False, ave_log_cpm_vals=None):
     """Estimate tagwise dispersions using exact conditional likelihood.
 
     Port of edgeR's estimateTagwiseDisp.
@@ -597,9 +633,9 @@ def estimate_tagwise_disp(y, group=None, lib_size=None, dispersion=None,
     prior_df : float
         Prior degrees of freedom.
     trend : str
-        'movingave', 'loess', or 'none'.
+        'movingave', 'loess' ('tricube'), or 'none'.
     span : float, optional
-        Smoothing span.
+        Smoothing span; 0.3 for 'movingave' and 0.5 otherwise.
     method : str
         'grid' or 'optimize'.
     grid_length : int
@@ -608,6 +644,8 @@ def estimate_tagwise_disp(y, group=None, lib_size=None, dispersion=None,
         Grid range.
     tol : float
         Tolerance.
+    ave_log_cpm_vals : ndarray, optional
+        AveLogCPM, computed at the given dispersion if not supplied.
 
     Returns
     -------
@@ -620,21 +658,23 @@ def estimate_tagwise_disp(y, group=None, lib_size=None, dispersion=None,
         dge = valid_dgelist(dge)
         group = dge['samples']['group'].values
         ls = dge['samples']['lib.size'].values * dge['samples']['norm.factors'].values
-
+        if dge.get('AveLogCPM') is None:
+            dge['AveLogCPM'] = ave_log_cpm(dge)
         if dispersion is None:
             dispersion = dge.get('common.dispersion')
             if dispersion is None:
                 raise ValueError("No common.dispersion found. Run estimate_common_disp first.")
-
-        if dge.get('AveLogCPM') is None:
-            dge['AveLogCPM'] = ave_log_cpm(dge)
-
-        td = estimate_tagwise_disp(
-            dge['counts'], group=group, lib_size=ls, dispersion=dispersion,
-            prior_df=prior_df, trend=trend, span=span, method=method,
-            grid_length=grid_length, grid_range=grid_range, tol=tol)
-        dge['tagwise.dispersion'] = td
+        nlibs = dge['counts'].shape[1]
         dge['prior.df'] = prior_df
+        dge['prior.n'] = prior_df / (nlibs - len(np.unique(group)))
+        if span is None:
+            span = 0.3 if trend == 'movingave' else 0.5
+        dge['tagwise.dispersion'] = estimate_tagwise_disp(
+            dge['counts'], group=group, lib_size=ls, dispersion=dispersion,
+            ave_log_cpm_vals=dge['AveLogCPM'], prior_df=prior_df, trend=trend,
+            span=span, method=method, grid_length=grid_length,
+            grid_range=grid_range, tol=tol, verbose=verbose)
+        dge['span'] = span
         return dge
 
     y = np.asarray(y, dtype=np.float64)
@@ -644,60 +684,64 @@ def estimate_tagwise_disp(y, group=None, lib_size=None, dispersion=None,
 
     if group is None:
         group = np.ones(nlibs, dtype=int)
-    group = np.asarray(group)
-
+    group = np.asarray(drop_empty_levels(np.asarray(group)))
     if lib_size is None:
         lib_size = y.sum(axis=0)
     lib_size = np.asarray(lib_size, dtype=np.float64)
-    if np.any(~np.isfinite(lib_size)) or np.any(lib_size <= 0):
-        raise ValueError("library sizes must be positive finite values")
+    if ave_log_cpm_vals is None:
+        ave_log_cpm_vals = ave_log_cpm(y, lib_size=lib_size, dispersion=dispersion)
+    if trend == 'tricube':
+        trend = 'loess'
+    if trend not in ('none', 'loess', 'movingave'):
+        raise ValueError("trend must be 'none', 'loess', 'movingave' or 'tricube'")
+    if method not in ('grid', 'optimize'):
+        raise ValueError("method must be 'grid' or 'optimize'")
 
-    if dispersion is None:
-        dispersion = 0.1
-
-    if span is None:
-        span = (10 / ntags) ** 0.23 if ntags > 10 else 1.0
-
-    ngroups = len(np.unique(group))
-    if ngroups >= nlibs:
-        warnings.warn("No residual df: cannot estimate tagwise dispersion")
-        return np.full(ntags, np.nan)
-
-    # Equalize library sizes
     from .exact_test import equalize_lib_sizes, split_into_groups
     eq = equalize_lib_sizes(y, group=group, dispersion=dispersion, lib_size=lib_size)
-    y_pseudo = eq['pseudo.counts']
-    y_split = split_into_groups(y_pseudo, group=group)
-
-    # Compute log-likelihoods on grid
-    spline_pts = np.linspace(grid_range[0], grid_range[1], grid_length)
-
-    if np.isscalar(dispersion):
-        disp_base = dispersion
-    else:
-        disp_base = np.median(dispersion)
-
-    grid_disp = disp_base * 2 ** spline_pts
-    grid_delta = grid_disp / (1 + grid_disp)
-
-    l0 = np.zeros((ntags, grid_length))
-    r_vals = (1.0 / np.maximum(grid_delta, 1e-300)) - 1.0
-    for grp_data in y_split:
-        l0 += _cond_log_lik_grid(grp_data, r_vals)
-
-    # Compute AveLogCPM for smoothing
-    alc = ave_log_cpm(y, lib_size=lib_size)
-
-    # Use WLEB
+    u = split_into_groups(eq['pseudo.counts'], group=group)
+    ngroups = len(np.unique(group))
     prior_n = prior_df / (nlibs - ngroups)
 
-    out = WLEB(theta=spline_pts, loglik=l0, prior_n=prior_n,
-               covariate=alc, trend_method='movingave' if trend == 'movingave' else
-               ('loess' if trend == 'loess' else 'none'),
-               span=span)
+    if method == 'grid':
+        # Conditional log-likelihoods on a grid around the common dispersion,
+        # smoothed across genes and added prior.n times to each gene's
+        spline_pts = np.linspace(grid_range[0], grid_range[1], grid_length)
+        spline_disp = dispersion * 2 ** spline_pts
+        grid_vals = spline_disp / (1 + spline_disp)
+        l0 = np.zeros((ntags, grid_length))
+        for j in range(grid_length):
+            for grp in u:
+                l0[:, j] += cond_log_lik_der_delta(grp, grid_vals[j], der=0)
+        if span is None:
+            span = 0.3 if trend == 'movingave' else 0.5
+        if trend == 'movingave':
+            o = np.argsort(ave_log_cpm_vals, kind='stable')
+            m0 = np.empty_like(l0)
+            m0[o] = moving_average_by_col(l0[o], width=int(np.floor(span * ntags)))
+        elif trend == 'loess':
+            m0 = loess_by_col(l0, ave_log_cpm_vals, span=span)['fitted_values']
+        else:
+            m0 = np.tile(l0.mean(axis=0), (ntags, 1))
+        d = maximize_interpolant(spline_pts, l0 + prior_n * m0)
+        return dispersion * 2 ** d
 
-    tagwise_dispersion = disp_base * 2 ** out['individual']
-    return tagwise_dispersion
+    if trend != 'none':
+        raise ValueError("optimize method doesn't allow for abundance-dispersion trend")
+
+    def total(delta):
+        return sum(cond_log_lik_der_delta(grp, delta, der=0) for grp in u)
+
+    delta = np.empty(ntags)
+    for tag in range(ntags):
+        # weightedCondLogLikDerDelta: the gene's likelihood plus prior.n / ntags
+        # times the summed likelihood over all genes
+        delta[tag] = optimize_brent(
+            lambda dl: -(lambda l: l[tag] + prior_n / ntags * l.sum())(total(dl)),
+            1e-4, 100 / 101, tol=tol)
+        if verbose and (tag + 1) % 100 == 0:
+            print(f"tag {tag + 1}")
+    return delta / (1 - delta)
 
 
 def estimate_trended_disp(y, group=None, lib_size=None, ave_log_cpm_vals=None,
@@ -741,48 +785,24 @@ def estimate_trended_disp(y, group=None, lib_size=None, ave_log_cpm_vals=None,
     if ave_log_cpm_vals is None:
         ave_log_cpm_vals = ave_log_cpm(y, lib_size=lib_size)
 
-    # Bin genes by abundance and estimate dispersion in each bin
+    if method not in ('bin.spline', 'bin.loess'):
+        raise ValueError("method must be 'bin.spline' or 'bin.loess'")
+
+    # Bin genes by abundance and estimate the common dispersion in each bin
     nbins = 50
     if nbins > ntags:
-        nbins = max(1, ntags // 2)
-
-    bins = cut_with_min_n(ave_log_cpm_vals, intervals=nbins,
-                          min_n=max(1, ntags // nbins))
-    disp_bins = np.zeros(nbins)
-    ave_bins = np.zeros(nbins)
-
+        raise ValueError("nbins greater than number of rows of data")
+    bins = cut_with_min_n(ave_log_cpm_vals, intervals=nbins, min_n=ntags // nbins)
+    disp_bins = np.empty(nbins)
+    ave_bins = np.empty(nbins)
     for i in range(1, nbins + 1):
         mask = bins['group'] == i
-        if np.sum(mask) == 0:
-            continue
-        disp_bins[i - 1] = estimate_common_disp(y[mask], group=group,
-                                                 lib_size=lib_size,
-                                                 rowsum_filter=0)
+        disp_bins[i - 1] = estimate_common_disp(y[mask], group=group, lib_size=lib_size,
+                                                rowsum_filter=0)
         ave_bins[i - 1] = np.mean(ave_log_cpm_vals[mask])
 
-    # Fit trend
-    if method == 'bin.spline':
-        from scipy.interpolate import UnivariateSpline
-        order = np.argsort(ave_bins)
-        try:
-            spl = UnivariateSpline(ave_bins[order],
-                                   np.sqrt(np.maximum(disp_bins[order], 0)),
-                                   k=min(3, len(ave_bins) - 1),
-                                   s=len(ave_bins) * 0.1)
-            trended = spl(ave_log_cpm_vals) ** 2
-        except Exception:
-            trended = np.full(ntags, np.mean(disp_bins))
-    else:
-        # bin.loess
-        from scipy.interpolate import interp1d
-        try:
-            f = interp1d(ave_bins, np.sqrt(np.maximum(disp_bins, 0)),
-                         fill_value='extrapolate')
-            trended = f(ave_log_cpm_vals) ** 2
-        except Exception:
-            trended = np.full(ntags, np.mean(disp_bins))
-
-    return np.maximum(trended, 0)
+    return _trend_from_bins(ave_bins, disp_bins, ave_log_cpm_vals,
+                            'spline' if method == 'bin.spline' else 'loess', df=df, span=span)
 
 
 def estimate_glm_common_disp(y, design=None, offset=None, method='CoxReid',
@@ -799,6 +819,10 @@ def estimate_glm_common_disp(y, design=None, offset=None, method='CoxReid',
     # DGEList input
     if isinstance(y, dict) and 'counts' in y:
         dge = y
+        if weights is not None:
+            # Weights given explicitly act as the DGEList's own weights
+            dge = type(dge)(dge)
+            dge['weights'] = weights
         from .dgelist import valid_dgelist, get_offset
         dge = valid_dgelist(dge)
         alc = ave_log_cpm(dge, dispersion=0.05)
@@ -876,6 +900,10 @@ def estimate_glm_trended_disp(y, design=None, offset=None,
     # DGEList input
     if isinstance(y, dict) and 'counts' in y:
         dge = y
+        if weights is not None:
+            # Weights given explicitly act as the DGEList's own weights
+            dge = type(dge)(dge)
+            dge['weights'] = weights
         if dge.get('AveLogCPM') is None:
             dge['AveLogCPM'] = ave_log_cpm(dge)
         from .dgelist import get_offset
@@ -941,7 +969,7 @@ def estimate_glm_trended_disp(y, design=None, offset=None,
 
 
 def estimate_glm_tagwise_disp(y, design=None, offset=None, dispersion=None,
-                               prior_df=10, trend=True, span=None,
+                               prior_df=10, trend=None, span=None,
                                ave_log_cpm_vals=None, weights=None):
     """Estimate tagwise dispersions using GLM approach.
 
@@ -954,6 +982,12 @@ def estimate_glm_tagwise_disp(y, design=None, offset=None, dispersion=None,
     # DGEList input
     if isinstance(y, dict) and 'counts' in y:
         dge = y
+        if weights is not None:
+            # Weights given explicitly act as the DGEList's own weights
+            dge = type(dge)(dge)
+            dge['weights'] = weights
+        if trend is None:
+            trend = dge.get('trended.dispersion') is not None
         if trend:
             dispersion = dge.get('trended.dispersion')
             if dispersion is None:
@@ -1013,6 +1047,8 @@ def estimate_glm_tagwise_disp(y, design=None, offset=None, dispersion=None,
 
     if span is None:
         span = (10 / ntags) ** 0.23 if ntags > 10 else 1.0
+    if trend is None:
+        trend = True
 
     if ave_log_cpm_vals is None:
         ave_log_cpm_vals = ave_log_cpm(y, offset=offset, weights=weights)
