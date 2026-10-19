@@ -1209,10 +1209,12 @@ def test_read_data_uses_the_catch_readers(source, path, reader):
     else:
         args = sorted(str(QUANT / path / d) for d in os.listdir(folder))
     y = ep.read_data(args, source=source, ngibbs=50, group=["a", "b", "b"], verbose=False)
-    # Counts as quantified (divide=False), with the readers' annotation
+    # Counts as quantified (divide=False) and the readers' overdispersions;
+    # read_data keeps transcript names as read and its EffectiveLength column
     np.testing.assert_array_equal(y["counts"], expected["counts"])
-    import pandas.testing as pdt
-    pdt.assert_frame_equal(y["genes"], expected["genes"])
+    np.testing.assert_array_equal(y["genes"]["Overdispersion"], expected["genes"]["Overdispersion"])
+    assert y["genes"].index[0].count("|") >= 8 or source == "kallisto"
+    assert ("EffectiveLength" in y["genes"]) == (source != "oarfish")
     assert list(y["samples"]["group"]) == ["a", "b", "b"]
     np.testing.assert_allclose(ep.read_data(args, source=source, ngibbs=50, divide=True, verbose=False)["counts"],
                                expected["counts"] / expected["genes"]["Overdispersion"].to_numpy()[:, None])

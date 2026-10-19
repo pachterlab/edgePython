@@ -246,8 +246,16 @@ def _rowsum(x, codes, n):
 
 def _assemble_tx(samples, length_name="Length", has_eff_len=True, impute_eff_len=True,
                  log_zero=None, drop_ann_length=True, divide=True, offset_prior=True,
-                 dgelist=True, verbose=True):
-    """Transcript-level output, as catchSalmon/catchKallisto/catchRSEM/catchOarfish."""
+                 dgelist=True, verbose=True, unpack_gencode=True, effective_length_column=False,
+                 capture=None):
+    """Transcript-level output, as catchSalmon/catchKallisto/catchRSEM/catchOarfish.
+
+    unpack_gencode=False keeps Gencode names as they are, and
+    effective_length_column=True adds the first sample's effective lengths
+    as genes['EffectiveLength'] (both as read_data has always done).
+    capture, a dict, receives the transcript IDs as read and the first
+    sample's effective lengths.
+    """
     names, types = [], []
     n_resampled = 0
     for j, s in enumerate(samples):
@@ -274,6 +282,11 @@ def _assemble_tx(samples, length_name="Length", has_eff_len=True, impute_eff_len
     ann = pd.DataFrame(index=pd.Index(ids))
     if length is not None:
         ann[length_name] = length
+    if capture is not None:
+        capture["ids"] = ids
+        capture["eff0"] = cols_eff[0] if has_eff_len else None
+    if effective_length_column and has_eff_len:
+        ann["EffectiveLength"] = cols_eff[0]
     log_len = eff_len = None
     if has_eff_len:
         eff_len = np.column_stack(cols_eff)
@@ -287,7 +300,7 @@ def _assemble_tx(samples, length_name="Length", has_eff_len=True, impute_eff_len
     overdisp, od_prior = od.estimate()
     ann["Overdispersion"] = overdisp
 
-    if len(ids) and _is_gencode(ids[0]):
+    if unpack_gencode and len(ids) and _is_gencode(ids[0]):
         A = split_gencode_tx_names(ids)
         for c in _GENCODE_COLUMNS[1:]:
             if c != "AnnLength" or not drop_ann_length:
@@ -697,12 +710,32 @@ def _lr_eff_len(samples):
     return samples, True
 
 
+def _legacy(paths, verbose_arg, sample_dirs):
+    """Detect calls in the style of earlier edgePython versions:
+    catch_salmon(paths, verbose) with a list of sample directories."""
+    if isinstance(sample_dirs, bool):
+        return True, None, sample_dirs
+    return False, sample_dirs, verbose_arg
+
+
+def _add_legacy_annotation(y, capture, paths, length_from_eff=True):
+    """Add the 'annotation' table and samples['files'] that earlier
+    edgePython versions of catch_salmon/catch_kallisto/catch_rsem returned."""
+    ann = pd.DataFrame({"GeneID": capture["ids"]})
+    if length_from_eff and capture.get("eff0") is not None:
+        ann["Length"] = capture["eff0"]
+    y["annotation"] = ann
+    if "samples" in y:
+        y["samples"]["files"] = list(paths)
+    return y
+
+
 # =====================================================================
 # Public readers
 # =====================================================================
 
 def catch_salmon(parent_dir=None, sample_dirs=None, dgelist=True, divide=True,
-                 impute_eff_len=True, offset_prior=True, verbose=True):
+                 impute_eff_len=True, offset_prior=True, verbose=True, paths=None):
     """Read Salmon transcript quantifications with bootstrap or Gibbs samples.
 
     Port of edgeR 5.0's catchSalmon(). Overdispersions estimated from the
@@ -731,9 +764,16 @@ def catch_salmon(parent_dir=None, sample_dirs=None, dgelist=True, divide=True,
     verbose : bool
         Print progress.
     """
+    old_style, sample_dirs, verbose = _legacy(paths, verbose, sample_dirs)
+    if paths is not None:
+        parent_dir, sample_dirs = None, paths
+    old_style = old_style or paths is not None or isinstance(parent_dir, (list, tuple))
     paths = _sample_paths(parent_dir, sample_dirs, ["aux_info"])
-    return _assemble_tx(_salmon_samples(paths, verbose), impute_eff_len=impute_eff_len,
-                        divide=divide, offset_prior=offset_prior, dgelist=dgelist, verbose=verbose)
+    capture = {}
+    y = _assemble_tx(_salmon_samples(paths, verbose), impute_eff_len=impute_eff_len,
+                     divide=divide, offset_prior=offset_prior, dgelist=dgelist, verbose=verbose,
+                     capture=capture)
+    return _add_legacy_annotation(y, capture, paths) if old_style else y
 
 
 def catch_salmon_gene(parent_dir=None, sample_dirs=None, tx2gene=None, remove_version=True,
@@ -768,7 +808,7 @@ def catch_salmon_gene(parent_dir=None, sample_dirs=None, tx2gene=None, remove_ve
 
 
 def catch_kallisto(parent_dir=None, sample_dirs=None, dgelist=True, divide=True,
-                   impute_eff_len=True, offset_prior=True, verbose=True):
+                   impute_eff_len=True, offset_prior=True, verbose=True, paths=None):
     """Read kallisto transcript quantifications with bootstrap samples.
 
     Port of edgeR 5.0's catchKallisto(). Each sample directory holds
@@ -777,9 +817,16 @@ def catch_kallisto(parent_dir=None, sample_dirs=None, dgelist=True, divide=True,
     catch_salmon; by default every subdirectory of parent_dir holding
     abundance.h5 or abundance.tsv is read.
     """
+    old_style, sample_dirs, verbose = _legacy(paths, verbose, sample_dirs)
+    if paths is not None:
+        parent_dir, sample_dirs = None, paths
+    old_style = old_style or paths is not None or isinstance(parent_dir, (list, tuple))
     paths = _sample_paths(parent_dir, sample_dirs, ["abundance.h5", "abundance.tsv"])
-    return _assemble_tx(_kallisto_samples(paths, verbose), impute_eff_len=impute_eff_len,
-                        divide=divide, offset_prior=offset_prior, dgelist=dgelist, verbose=verbose)
+    capture = {}
+    y = _assemble_tx(_kallisto_samples(paths, verbose), impute_eff_len=impute_eff_len,
+                     divide=divide, offset_prior=offset_prior, dgelist=dgelist, verbose=verbose,
+                     capture=capture)
+    return _add_legacy_annotation(y, capture, paths) if old_style else y
 
 
 def catch_kallisto_gene(parent_dir=None, sample_dirs=None, tx2gene=None, remove_version=True,
@@ -855,13 +902,27 @@ def catch_rsem(parent_dir=None, files=None, ngibbs=100, dgelist=True, divide=Tru
     dgelist, divide, offset_prior, verbose :
         As for catch_salmon.
     """
+    # Earlier versions were called catch_rsem(files, verbose) or catch_rsem(files=...)
+    old_style = isinstance(parent_dir, (list, tuple)) or (parent_dir is None and files is not None)
     if isinstance(parent_dir, (list, tuple)):
-        # Older edgePython calls passed a list of files
+        # Earlier edgePython versions took catch_rsem(files, verbose)
+        if isinstance(files, bool):
+            verbose = files
         parent_dir, files = None, list(parent_dir)
     files = _rsem_files(parent_dir, files, ".isoforms.results")
-    return _assemble_tx(_rsem_samples(files, ngibbs, "transcript_id", verbose),
-                        impute_eff_len=False, log_zero=1e-8, divide=divide,
-                        offset_prior=offset_prior, dgelist=dgelist, verbose=verbose)
+    if all(f.endswith(".genes.results") for f in files):
+        # Gene-level results, which earlier versions also read
+        y = catch_rsem_gene(files=files, ngibbs=ngibbs, remove_version=False, dgelist=dgelist,
+                            divide=divide, offset_prior=offset_prior, verbose=verbose)
+        if old_style:
+            ann = y["genes"] if dgelist else y["annotation"]
+            _add_legacy_annotation(y, {"ids": np.asarray(ann.index, dtype=object)}, files, False)
+        return y
+    capture = {}
+    y = _assemble_tx(_rsem_samples(files, ngibbs, "transcript_id", verbose),
+                     impute_eff_len=False, log_zero=1e-8, divide=divide,
+                     offset_prior=offset_prior, dgelist=dgelist, verbose=verbose, capture=capture)
+    return _add_legacy_annotation(y, capture, files, False) if old_style else y
 
 
 def catch_rsem_gene(parent_dir=None, files=None, ngibbs=100, remove_version=True,

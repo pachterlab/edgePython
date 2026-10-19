@@ -904,21 +904,32 @@ def read_data(
     if labels is None and source not in ('lr_kallisto', 'oarfish'):
         labels = [os.path.basename(os.path.normpath(p)) for p in paths]
 
+    # The catch_* readers' code, keeping read_data's transcript names (no
+    # Gencode unpacking) and its EffectiveLength column
     from . import quant_readers as qr
-    common = dict(divide=divide, verbose=verbose)
+    common = dict(divide=divide, verbose=verbose, unpack_gencode=False,
+                  effective_length_column=True)
     if source == 'kallisto':
         dge = qr._assemble_tx(qr._kallisto_samples(paths, verbose, format), **common)
     elif source == 'lr_kallisto':
-        dge = qr.catch_lr_kallisto(paths[0], sample_names=labels, **common)
+        samples, has_eff = qr._lr_eff_len(qr._lr_kallisto_samples(paths[0], labels, verbose))
+        has_length = bool(samples) and samples[0]['length'] is not None
+        dge = qr._assemble_tx(samples, has_eff_len=has_eff, impute_eff_len=has_length, **common)
     elif source == 'salmon':
-        dge = qr.catch_salmon(sample_dirs=paths, **common)
+        dge = qr._assemble_tx(qr._salmon_samples(paths, verbose), **common)
     elif source == 'oarfish':
-        if isinstance(data, str) and os.path.isdir(data):
-            dge = qr.catch_oarfish(parent_dir=data, **common)
-        else:
-            dge = qr.catch_oarfish(prefixes=paths, **common)
+        prefixes = qr._oarfish_prefixes(data, None) if isinstance(data, str) and os.path.isdir(data) \
+            else qr._oarfish_prefixes(None, paths)
+        dge = qr._assemble_tx(qr._oarfish_samples(prefixes, verbose), has_eff_len=False,
+                              drop_ann_length=False, **common)
     elif source == 'rsem':
-        dge = qr.catch_rsem(files=paths, ngibbs=ngibbs, **common)
+        files = [str(f) for f in paths]
+        if all(f.endswith('.genes.results') for f in files):
+            dge = qr.catch_rsem_gene(files=files, ngibbs=ngibbs, remove_version=False,
+                                     divide=divide, verbose=verbose)
+        else:
+            dge = qr._assemble_tx(qr._rsem_samples(files, ngibbs, 'transcript_id', verbose),
+                                  impute_eff_len=False, log_zero=1e-8, **common)
     else:
         raise ValueError(f"Unknown source: {source!r}")
 

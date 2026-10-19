@@ -864,7 +864,7 @@ def _count_zscores(y, kind, design, contrast):
 
 def camera(y, index, design=None, contrast=None, weights=None,
            use_ranks=False, allow_neg_cor=False, inter_gene_cor=0.01,
-           trend_var=False, sort=True, directional=True):
+           sort=True, trend_var=False, directional=True):
     """Competitive gene set test accounting for inter-gene correlation.
 
     Port of limma 3.99's camera.default and edgeR's camera.DGEList.
@@ -896,10 +896,10 @@ def camera(y, index, design=None, contrast=None, weights=None,
     inter_gene_cor : float or None
         Fixed inter-gene correlation (default 0.01). None or NaN estimates
         it from each set and adds a Correlation column.
-    trend_var : bool
-        Use a mean-variance trend when squeezing the variances.
     sort : bool
         Sort results by p-value.
+    trend_var : bool
+        Use a mean-variance trend when squeezing the variances.
     directional : bool
         If False, test for any change regardless of direction (implies
         use_ranks).
@@ -921,8 +921,8 @@ def camera(y, index, design=None, contrast=None, weights=None,
                            sort=sort, directional=directional)
 
 
-def fry(y, index=None, design=None, contrast=None, geneid=None, gene_weights=None,
-        standardize='posterior.sd', sort='directional', array_weights=None,
+def fry(y, index=None, design=None, contrast=None, sort='directional', geneid=None,
+        gene_weights=None, standardize='posterior.sd', array_weights=None,
         weights=None, block=None, correlation=None, trend_var=False,
         robust=False, winsor_tail_p=(0.05, 0.1)):
     """Fast approximation to roast with infinite rotations.
@@ -943,14 +943,14 @@ def fry(y, index=None, design=None, contrast=None, geneid=None, gene_weights=Non
     contrast : int or ndarray, optional
         Column index (0-based) or contrast vector. Defaults to the last
         column.
+    sort : str or bool
+        'directional' (default), 'mixed' or 'none'.
     geneid : array-like, optional
         Gene IDs used to match character gene sets.
     gene_weights : array-like, optional
         Weights applied to the genes of every unweighted set.
     standardize : str
         'posterior.sd' (default), 'residual.sd', 'p2' or 'none'.
-    sort : str or bool
-        'directional' (default), 'mixed' or 'none'.
     array_weights, weights : array-like, optional
         Array weights, or observation weights (G x n; defaults to
         y['weights'] for an EList).

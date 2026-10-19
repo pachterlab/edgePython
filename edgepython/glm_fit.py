@@ -527,6 +527,8 @@ def glm_ql_fit(y, design=None, dispersion=None, offset=None, lib_size=None,
     fit['df.prior'] = s2_fit['df_prior']
     fit['s2.post'] = s2_fit['var_post']
     fit['s2.prior'] = s2_fit['var_prior']
+    if not legacy:
+        fit['top.proportion'] = top_proportion
 
     return fit
 

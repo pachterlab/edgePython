@@ -1191,22 +1191,22 @@ def voom(
     counts,
     design=None,
     lib_size=None,
-    offset=None,
-    offset_prior=None,
     normalize_method="none",
-    block=None,
-    correlation=None,
-    weights=None,
     span=0.5,
     adaptive_span=True,
-    save_plot=False,
+    block=None,
+    correlation=None,
     prior_weights=None,
     sample_weights=False,
     var_design=None,
     var_group=None,
     prior_n=10.0,
     structural_zeros=False,
+    save_plot=False,
     keep_elist=True,
+    offset=None,
+    offset_prior=None,
+    weights=None,
 ):
     """Transform counts to log2-CPM with precision weights (limma's voom).
 
@@ -1262,6 +1262,8 @@ def voom(
         "coefficients": fit.coefficients, "stdev_unscaled": fit.stdev_unscaled,
         "fitted": fit.fitted_values, "residuals": fit.residuals, "sigma": fit.sigma,
         "df_residual": fit.df_residual, "offset_prior": offset_prior,
+        # Kept from earlier edgePython versions; voom_lmfit sets sample_weights
+        "correlation": correlation, "sample_weights": None,
     }
 
     n_with_reps = int(np.sum(fit.df_residual > 0))
@@ -1326,13 +1328,13 @@ def voom_lmfit(
     var_group=None,
     prior_n=10.0,
     lib_size=None,
-    offset=None,
-    offset_prior=None,
     normalize_method="none",
     span=0.5,
     adaptive_span=True,
     save_plot=False,
     keep_elist=True,
+    offset=None,
+    offset_prior=None,
 ):
     """voom followed by a linear model fit (limma's voomLmFit).
 

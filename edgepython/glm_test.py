@@ -124,8 +124,8 @@ def glm_lrt(glmfit, coef=None, contrast=None):
     return result
 
 
-def glm_ql_ftest(glmfit, coef=None, contrast=None, fc=1.0, lfc=None,
-                 poisson_bound=True, upshot=True):
+def glm_ql_ftest(glmfit, coef=None, contrast=None, poisson_bound=True, fc=1.0,
+                 lfc=None, upshot=True):
     """Quasi-likelihood F-test for GLM coefficients.
 
     Port of edgeR 5.0's glmQLFTest. With a fold-change threshold (fc > 1 or
@@ -141,14 +141,14 @@ def glm_ql_ftest(glmfit, coef=None, contrast=None, fc=1.0, lfc=None,
         Coefficient(s) to test (0-based). Defaults to the last.
     contrast : ndarray, optional
         Contrast vector, or matrix with one column per contrast.
+    poisson_bound : bool
+        For legacy fits, raise p-values to those of a Poisson LRT for
+        genes whose quasi-dispersion is below the Poisson bound.
     fc : float
         Fold-change threshold; ignored if lfc is given.
     lfc : float or array, optional
         log2 fold-change threshold(s), one per tested coefficient or a
         single value for all. Defaults to log2(fc).
-    poisson_bound : bool
-        For legacy fits, raise p-values to those of a Poisson LRT for
-        genes whose quasi-dispersion is below the Poisson bound.
     upshot : bool
         With a threshold, use UPSHOT rather than plain TREAT.
 
