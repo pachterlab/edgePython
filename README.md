@@ -137,7 +137,7 @@ edgePython includes some functionality that edgeR does not have:
 - **kallisto plaintext output**: `catch_kallisto` also reads `abundance.tsv` with plaintext bootstraps (`bs_abundance_*.tsv`); edgeR requires `abundance.h5`.
 - **tximeta without R**: `dgelist_from_tximeta` accepts an AnnData or a dictionary of assays in place of a SummarizedExperiment.
 - **Universal reader and AnnData export**: `read_data` detects and reads quantifier output, 10X data, count tables, AnnData (`.h5ad`) and, with R installed, R `.rds` objects; `to_anndata` exports results.
-- **MCP server**: [MCP/edgepython_server.py](MCP/edgepython_server.py) lets AI agents run a differential expression analysis through tool calls.
+- **MCP server**: [MCP/edgepython_server.py](MCP/edgepython_server.py) lets AI agents run analyses through tool calls: differential expression (QL F-tests with or without fold-change thresholds, TREAT, LRT, exact tests, voom), quantifier output read with the `catch_*` readers, differential transcript usage, gene set tests (camera, fry), differential methylation (binomial QL models), ChIP-seq, and the single-cell mixed model. It requires `fastmcp` (`pip install fastmcp`).
 
 ## edgeR bugs corrected in edgePython
 

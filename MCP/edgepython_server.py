@@ -18,6 +18,7 @@ import pandas as pd
 from typing import Optional
 
 from fastmcp import FastMCP
+from statsmodels.stats.multitest import multipletests
 
 # Ensure edgePython is importable
 _edgepython_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -37,8 +38,11 @@ mcp = FastMCP(
         "Bulk workflow: load_data → filter_genes → normalize → set_design → "
         "estimate_dispersion (or estimate_glm_robust_dispersion) → "
         "voom_transform (optional) → fit_model → test_contrast → "
-        "get_top_genes / generate_plot. DTU: dtu_diff_splice_dge or "
-        "dtu_splice_variants. "
+        "get_top_genes / generate_plot / gene_set_test. Quantifier output "
+        "(salmon, kallisto, lr-kallisto, oarfish, RSEM): load_quant. DTU: "
+        "load_quant → estimate_dispersion → dtu_diff_splice_dge or "
+        "dtu_splice_variants. Methylation: load_bismark → fit_bin_model → "
+        "test_bin → get_top_genes. "
         "Single-cell workflow: load_sc_data → fit_sc_model → test_sc_coef → get_sc_top_genes. "
         "Use describe() or describe_sc() to see current pipeline state."
     ),
@@ -229,7 +233,7 @@ def _resolve_gene_exon_ids(
         gene_ids = gdf[gene_column].astype(str).values
     else:
         found = None
-        for col in ("GeneID", "geneid", "gene_id", "Gene"):
+        for col in ("GeneID", "geneid", "gene_id", "Gene", "EnsG"):
             if col in gdf.columns:
                 found = col
                 break
@@ -247,7 +251,12 @@ def _resolve_gene_exon_ids(
             if col in gdf.columns:
                 found = col
                 break
-        exon_ids = gdf[found].astype(str).values if found is not None else np.arange(len(gene_ids))
+        if found is not None:
+            exon_ids = gdf[found].astype(str).values
+        elif not isinstance(gdf.index, pd.RangeIndex):
+            exon_ids = gdf.index.astype(str).values
+        else:
+            exon_ids = np.arange(len(gene_ids))
 
     return np.asarray(gene_ids), np.asarray(exon_ids)
 
@@ -389,6 +398,7 @@ def load_data_auto(
     obs_col: Optional[str] = None,
     layer: Optional[str] = None,
     ngibbs: int = 100,
+    divide: bool = False,
     verbose: bool = True,
 ) -> str:
     """Load data using edgePython's flexible read_data() loader.
@@ -397,8 +407,10 @@ def load_data_auto(
         data: Path to file/dir or other supported value. If data_list is provided,
             this is ignored.
         data_list: Optional list of paths (e.g. quantification dirs).
-        source: Data source (kallisto, salmon, oarfish, rsem, 10x, table,
-            anndata, rds, sparse, matrix, dataframe). Auto-detected if None.
+        source: Data source (kallisto, lr_kallisto, salmon, oarfish, rsem,
+            10x, table, anndata, rds, sparse, matrix, dataframe).
+            Auto-detected if None. For quantifier output with edgeR 5.0's
+            annotation and gene-level summaries, use load_quant().
         format: Source-specific format (e.g. 'h5' or 'tsv' for kallisto).
         path: Base path prefix for relative paths.
         group: Optional group assignments.
@@ -408,6 +420,8 @@ def load_data_auto(
         obs_col: For AnnData: column in .obs to use as group factor.
         layer: For AnnData: layer name to use instead of .X.
         ngibbs: For RSEM: number of Gibbs samples per sample.
+        divide: For quantifier output: divide counts by the estimated
+            overdispersions. Default False.
         verbose: Print progress messages.
     """
     if data_list is not None:
@@ -429,9 +443,30 @@ def load_data_auto(
         obs_col=obs_col,
         layer=layer,
         ngibbs=ngibbs,
+        divide=divide,
         verbose=verbose,
     )
 
+    lines = _register_loaded(dgelist, source=source, data_input=data_input)
+    return "\n".join(lines)
+
+
+def _feature_ids(dgelist) -> Optional[list]:
+    """Feature IDs from the gene annotation columns, or its row names."""
+    gdf = dgelist.get("genes")
+    if gdf is None:
+        return None
+    for col in ("GeneID", "gene_id", "gene_name", "Symbol"):
+        if col in gdf.columns:
+            return list(gdf[col].astype(str))
+    if not isinstance(gdf.index, pd.RangeIndex):
+        return [str(x) for x in gdf.index]
+    return None
+
+
+def _register_loaded(dgelist, source=None, data_input=None) -> list:
+    """Make a loaded DGEList the current data, clearing downstream state,
+    and return summary lines."""
     _state["dgelist"] = dgelist
     _state["filtered"] = False
     _state["normalized"] = False
@@ -445,15 +480,17 @@ def load_data_auto(
     _state["voom"] = None
 
     counts = dgelist["counts"]
-    gene_ids = None
-    if dgelist.get("genes") is not None:
-        gdf = dgelist["genes"]
-        for col in ("GeneID", "gene_id", "gene_name", "Symbol"):
-            if col in gdf.columns:
-                gene_ids = list(gdf[col].astype(str))
-                break
+    gene_ids = _feature_ids(dgelist)
     if gene_ids is not None:
         dgelist["_gene_ids"] = gene_ids
+
+    sample_names = None
+    if dgelist.get("samples") is not None:
+        sdf = dgelist["samples"]
+        if sdf.index is not None and len(sdf.index) == counts.shape[1]:
+            sample_names = [str(x) for x in sdf.index]
+    if sample_names is not None:
+        dgelist["_sample_names"] = sample_names
 
     level, level_note = _infer_feature_level(gene_ids)
     context, context_note = _infer_analysis_context(
@@ -467,14 +504,6 @@ def load_data_auto(
     _state["analysis_context"] = context
     _state["analysis_context_note"] = context_note
 
-    sample_names = None
-    if dgelist.get("samples") is not None:
-        sdf = dgelist["samples"]
-        if sdf.index is not None and len(sdf.index) == counts.shape[1]:
-            sample_names = [str(x) for x in sdf.index]
-    if sample_names is not None:
-        dgelist["_sample_names"] = sample_names
-
     lines = [f"Loaded {counts.shape[0]:,} genes × {counts.shape[1]} samples"]
     if sample_names is not None:
         lines.append(f"Samples: {', '.join(sample_names)}")
@@ -483,6 +512,94 @@ def load_data_auto(
     if _state.get("analysis_context_note"):
         lines.append(f"Context: {_state['analysis_context']} ({_state['analysis_context_note']})")
     _append_gene_level_warning(lines)
+    return lines
+
+
+# ---------------------------------------------------------------------------
+# Tool 1c: load_quant
+# ---------------------------------------------------------------------------
+
+_QUANT_READERS = {
+    "salmon": (ep.catch_salmon, ep.catch_salmon_gene),
+    "kallisto": (ep.catch_kallisto, ep.catch_kallisto_gene),
+    "lr_kallisto": (ep.catch_lr_kallisto, ep.catch_lr_kallisto_gene),
+    "oarfish": (ep.catch_oarfish, ep.catch_oarfish_gene),
+    "rsem": (ep.catch_rsem, ep.catch_rsem_gene),
+}
+
+
+@mcp.tool()
+def load_quant(
+    source: str,
+    paths: Optional[list] = None,
+    parent_dir: Optional[str] = None,
+    level: str = "transcript",
+    tx2gene_path: Optional[str] = None,
+    divide: bool = True,
+    group: Optional[list] = None,
+    verbose: bool = False,
+) -> str:
+    """Load quantifier output with edgeR 5.0's catch* readers.
+
+    Transcript-level counts are divided by the overdispersions estimated from
+    bootstrap or Gibbs samples (Baldoni et al. 2024), and Gencode transcript
+    names are unpacked into annotation columns (EnsG, TxName, GeneName, ...),
+    which dtu_diff_splice_dge and dtu_splice_variants use as gene IDs.
+    Gene-level loading sums the counts within genes.
+
+    Args:
+        source: 'salmon', 'kallisto', 'lr_kallisto', 'oarfish' or 'rsem'.
+        paths: Sample directories (salmon, kallisto), file prefixes (oarfish)
+            or isoforms.results files (rsem). Not used for lr_kallisto.
+        parent_dir: Directory holding the samples (alternative to paths;
+            required for lr_kallisto, holding the quant-tcc output).
+        level: 'transcript' (default) or 'gene'.
+        tx2gene_path: For level='gene': TSV/CSV whose first two columns map
+            transcript IDs to gene IDs. Not needed for Gencode transcript
+            names, or for rsem, which uses its genes.results files.
+        divide: Divide transcript counts by their overdispersions. Default True.
+        group: Optional group assignment for each sample.
+        verbose: Print progress messages.
+    """
+    if source not in _QUANT_READERS:
+        raise ValueError(f"source must be one of: {', '.join(_QUANT_READERS)}")
+    if level not in ("transcript", "gene"):
+        raise ValueError("level must be 'transcript' or 'gene'.")
+    tx_reader, gene_reader = _QUANT_READERS[source]
+    if source == "lr_kallisto":
+        if parent_dir is None:
+            raise ValueError("lr_kallisto requires parent_dir.")
+        kwargs = {"parent_dir": parent_dir}
+    else:
+        if paths is None and parent_dir is None:
+            raise ValueError("Provide paths or parent_dir.")
+        key = {"oarfish": "prefixes", "rsem": "files"}.get(source, "sample_dirs")
+        kwargs = {"parent_dir": parent_dir, key: paths}
+
+    if level == "gene":
+        if tx2gene_path is not None:
+            if source == "rsem":
+                raise ValueError("rsem gene-level loading uses its genes.results files; omit tx2gene_path.")
+            sep = "," if tx2gene_path.endswith(".csv") else "\t"
+            kwargs["tx2gene"] = pd.read_csv(tx2gene_path, sep=sep)
+        dgelist = gene_reader(divide=divide, verbose=verbose, **kwargs)
+    else:
+        dgelist = tx_reader(divide=divide, verbose=verbose, **kwargs)
+
+    if group is not None:
+        if len(group) != dgelist["counts"].shape[1]:
+            raise ValueError(f"group has {len(group)} values for {dgelist['counts'].shape[1]} samples.")
+        dgelist["samples"]["group"] = pd.Categorical([str(g) for g in group])
+
+    lines = _register_loaded(dgelist, source=source, data_input=paths or parent_dir)
+    od = dgelist.get("genes")
+    if od is not None and "Overdispersion" in od.columns:
+        vals = od["Overdispersion"].to_numpy(dtype=float)
+        lines.insert(1, (
+            f"Overdispersion: median {np.nanmedian(vals):.3g}, "
+            f"range {np.nanmin(vals):.3g}–{np.nanmax(vals):.3g}"
+            + (" (counts divided)" if dgelist.get("divided.counts") else "")
+        ))
     return "\n".join(lines)
 
 
@@ -587,8 +704,10 @@ def reset_state() -> str:
 
 @mcp.tool()
 def filter_genes(
-    min_count: int = 10,
-    min_total_count: int = 15,
+    min_count: Optional[float] = None,
+    min_total_count: Optional[float] = None,
+    preset: Optional[str] = None,
+    max_n_samples: Optional[float] = None,
 ) -> str:
     """Filter out lowly-expressed genes using edgeR's filterByExpr logic.
 
@@ -596,15 +715,21 @@ def filter_genes(
 
     Args:
         min_count: Minimum count threshold (used to derive CPM cutoff).
-            Default: 10.
-        min_total_count: Minimum total count across all samples. Default: 15.
+            Default: 10, or as set by preset.
+        min_total_count: Minimum total count across all samples. Default: 15,
+            or as set by preset.
+        preset: edgeR 5.0 preset thresholds: 'stringent', 'moderate' or
+            'lenient'. Overrides min_count and min_total_count.
+        max_n_samples: Cap on the number of samples a feature must be
+            expressed in (edgeR 5.0 default 40).
     """
     _require("dgelist", "DGEList")
     d = _state["dgelist"]
 
     group = d["samples"].get("group")
     keep = ep.filter_by_expr(
-        d, group=group, min_count=min_count, min_total_count=min_total_count
+        d, group=group, min_count=min_count, min_total_count=min_total_count,
+        preset=preset, max_n_samples=max_n_samples,
     )
 
     n_before = d["counts"].shape[0]
@@ -976,13 +1101,21 @@ def estimate_glm_robust_dispersion(
 @mcp.tool()
 def voom_transform(
     span: float = 0.5,
-    adaptive_span: bool = False,
+    adaptive_span: bool = True,
     sample_weights: bool = False,
     block_column: Optional[str] = None,
 ) -> str:
     """Run voom/voomLmFit-style mean-variance weighting.
 
     Uses current counts + design and stores the voom result in MCP state.
+
+    Args:
+        span: Lowess span, used when adaptive_span is False.
+        adaptive_span: Choose the span from the number of genes, as limma
+            3.99 does by default. Default True.
+        sample_weights: Estimate sample quality weights.
+        block_column: Sample metadata column giving blocks for
+            duplicateCorrelation.
     """
     _require("dgelist", "DGEList")
     _require("design", "design matrix")
@@ -1041,17 +1174,23 @@ def voom_transform(
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def fit_model(robust: bool = True) -> str:
+def fit_model(robust: bool = True, sample_weights: bool = False) -> str:
     """Fit a quasi-likelihood negative binomial GLM.
 
     Args:
         robust: Use robust empirical Bayes for QL dispersion. Default True.
+        sample_weights: Estimate sample quality weights from the fit (edgeR
+            5.0's sampleWeights) and refit with them. Default False.
     """
     _require("dgelist", "DGEList")
     _require("design", "design matrix")
     d = _state["dgelist"]
 
     fit = ep.glm_ql_fit(d, design=_state["design"], robust=robust)
+    sw = None
+    if sample_weights:
+        sw = ep.sample_weights(fit)
+        fit = ep.glm_ql_fit(d, design=_state["design"], robust=robust, weights=sw)
     _state["fit"] = fit
     # Clear old results
     _state["results"] = {}
@@ -1074,6 +1213,11 @@ def fit_model(robust: bool = True) -> str:
             lines.append(f"Prior QL dispersion: {s2:.4f}")
         else:
             lines.append(f"Prior QL dispersion (median): {np.median(s2):.4f}")
+    if sw is not None:
+        names = d.get("_sample_names") or [f"S{i}" for i in range(sw.shape[1])]
+        lines.append("Sample weights: " + ", ".join(
+            f"{n} {w:.3f}" for n, w in zip(names, sw[0])
+        ))
     lines.append(f"Coefficients: {', '.join(_state['design_info'])}")
 
     return "\n".join(lines)
@@ -1184,6 +1328,17 @@ def _parse_contrast(contrast_str: str, col_names: list) -> np.ndarray:
     return contrast
 
 
+def _run_ql_test(fit, method: str, lfc: float, coef=None, contrast=None):
+    """Run a QL F-test, a QL F-test against a fold-change threshold, or TREAT."""
+    if method == "treat":
+        return ep.glm_treat(fit, coef=coef, contrast=contrast, lfc=lfc)
+    if method == "qlf_threshold":
+        return ep.glm_ql_ftest(fit, coef=coef, contrast=contrast, lfc=lfc)
+    if method == "qlf":
+        return ep.glm_ql_ftest(fit, coef=coef, contrast=contrast)
+    raise ValueError("method must be 'qlf', 'qlf_threshold' or 'treat'.")
+
+
 @mcp.tool()
 def test_contrast(
     contrast: str,
@@ -1197,9 +1352,11 @@ def test_contrast(
         contrast: Contrast string, e.g. 'groupB - groupA'. Terms must
             match design matrix column names (shown by set_design/describe).
         name: Label for this result set. Default: auto-generated.
-        method: Test method — 'qlf' (quasi-likelihood F-test, default)
-            or 'treat' (TREAT with log-FC threshold).
-        lfc: Log2-fold-change threshold for TREAT method. Default: log2(1.5) ≈ 0.585.
+        method: Test method — 'qlf' (quasi-likelihood F-test, default),
+            'qlf_threshold' (edgeR 5.0's QL F-test against a log-FC
+            threshold, with UPSHOT p-values) or 'treat' (TREAT).
+        lfc: Log2-fold-change threshold for 'qlf_threshold' and 'treat'.
+            Default: log2(1.5) ≈ 0.585.
     """
     _require("fit", "fitted model")
     fit = _state["fit"]
@@ -1207,10 +1364,7 @@ def test_contrast(
 
     contrast_vec = _parse_contrast(contrast, col_names)
 
-    if method == "treat":
-        res = ep.glm_treat(fit, contrast=contrast_vec, lfc=lfc)
-    else:
-        res = ep.glm_ql_ftest(fit, contrast=contrast_vec)
+    res = _run_ql_test(fit, method, lfc, contrast=contrast_vec)
 
     if name is None:
         name = contrast.replace(" ", "")
@@ -1268,16 +1422,13 @@ def test_coef(
     Args:
         coef: 0-based coefficient index.
         name: Label for this result set. Default: auto-generated.
-        method: 'qlf' (default) or 'treat'.
-        lfc: Log2-fold-change threshold for TREAT method.
+        method: 'qlf' (default), 'qlf_threshold' or 'treat'; see test_contrast.
+        lfc: Log2-fold-change threshold for 'qlf_threshold' and 'treat'.
     """
     _require("fit", "fitted model")
     fit = _state["fit"]
 
-    if method == "treat":
-        res = ep.glm_treat(fit, coef=coef, lfc=lfc)
-    else:
-        res = ep.glm_ql_ftest(fit, coef=coef)
+    res = _run_ql_test(fit, method, lfc, coef=coef)
 
     if name is None:
         name = f"coef{coef}"
@@ -1429,10 +1580,14 @@ def dtu_diff_splice_dge(
 ) -> str:
     """Run DTU testing with diff_splice_dge on the current DGEList.
 
-    Requires a two-group design in sample metadata (samples['group']).
+    Requires a two-group design in sample metadata (samples['group']) and
+    dispersions from estimate_dispersion(). Gene IDs are taken from the gene
+    annotation (GeneID, gene_id or the EnsG column written by load_quant).
     """
     _require("dgelist", "DGEList")
     d = _state["dgelist"]
+    if not _state["dispersions_estimated"]:
+        raise ValueError("No dispersions available. Run estimate_dispersion() first.")
 
     if d.get("samples") is None or "group" not in d["samples"].columns:
         raise ValueError("DGEList samples['group'] is required for diff_splice_dge.")
@@ -1492,7 +1647,7 @@ def dtu_splice_variants(
         sv = sv.copy()
         sv["FDR"] = fdr
 
-    _state["results"][name] = {"table": sv}
+    _state["results"][name] = {"table": sv, "dtu": True}
     _state["last_result"] = name
 
     sig = sv[sv["FDR"] < 0.05] if "FDR" in sv.columns else sv.iloc[0:0]
@@ -1522,6 +1677,19 @@ def dtu_splice_variants(
 # Tool 9: get_top_genes
 # ---------------------------------------------------------------------------
 
+def _result_table(res: dict, n: Optional[int] = None) -> pd.DataFrame:
+    """Result table ranked by p-value: top_tags for DE and methylation
+    tests, the gene-level table for DTU tests."""
+    if "gene.table" in res:
+        table = res["gene.table"]
+    elif res.get("dtu"):
+        table = res["table"]
+    else:
+        return ep.top_tags(res, n=res["table"].shape[0] if n is None else n)["table"]
+    table = table.sort_values("PValue", kind="stable")
+    return table if n is None else table.head(n)
+
+
 @mcp.tool()
 def get_top_genes(
     name: Optional[str] = None,
@@ -1544,8 +1712,9 @@ def get_top_genes(
         return f"Result '{name}' not found. Available: {', '.join(available)}"
 
     res = _state["results"][name]
-    tt = ep.top_tags(res, n=n)
-    table = tt["table"]
+    if res.get("gene_sets"):
+        return f"Result: {name}\n\n" + res["table"].head(n).to_string()
+    table = _result_table(res, n)
 
     # Filter by FDR
     sig = table[table["FDR"] < fdr_threshold]
@@ -1556,11 +1725,10 @@ def get_top_genes(
         "",
     ]
 
-    # Determine which stat column to use (F or LR)
-    stat_col = "F" if "F" in table.columns else "LR" if "LR" in table.columns else None
-    header = f"{'Gene':<20} {'logFC':>8} {'logCPM':>8}"
-    if stat_col:
-        header += f" {stat_col:>8}"
+    # Columns present depend on the test (logFC or logOR; F, LR or none)
+    value_cols = [c for c in ("logFC", "logOR", "logCPM", "F", "LR", "NExons")
+                  if c in table.columns]
+    header = f"{'Gene':<20}" + "".join(f" {c:>8}" for c in value_cols)
     header += f" {'PValue':>10} {'FDR':>10} {'Sig':>3}"
     lines.append(header)
     lines.append("-" * len(header))
@@ -1570,9 +1738,9 @@ def get_top_genes(
         if len(gene) > 19:
             gene = gene[:17] + ".."
         sig_mark = "***" if row["FDR"] < 0.001 else "**" if row["FDR"] < 0.01 else "*" if row["FDR"] < fdr_threshold else ""
-        line = f"{gene:<20} {row['logFC']:>8.3f} {row['logCPM']:>8.2f}"
-        if stat_col:
-            line += f" {row[stat_col]:>8.2f}"
+        line = f"{gene:<20}"
+        for c in value_cols:
+            line += f" {int(row[c]):>8d}" if c == "NExons" else f" {row[c]:>8.3f}"
         line += f" {row['PValue']:>10.2e} {row['FDR']:>10.2e} {sig_mark:>3}"
         lines.append(line)
 
@@ -1606,8 +1774,10 @@ def get_result_table(
         return f"Result '{name}' not found. Available: {', '.join(available)}"
 
     res = _state["results"][name]
-    tt = ep.top_tags(res, n=res["table"].shape[0])
-    table = tt["table"]
+    if res.get("gene_sets"):
+        table = res["table"].rename_axis("Set").reset_index()
+    else:
+        table = _result_table(res)
     if max_rows is not None:
         table = table.iloc[:max_rows]
 
@@ -1800,6 +1970,251 @@ def generate_plot(
         return f"Heatmap saved to: {output_path}"
 
 
+# ---------------------------------------------------------------------------
+# Tool 11: gene_set_test
+# ---------------------------------------------------------------------------
+
+def _read_gene_sets(gene_sets: Optional[dict], gmt_path: Optional[str]) -> dict:
+    sets = {}
+    if gmt_path is not None:
+        with open(gmt_path, encoding="utf-8") as f:
+            for line in f:
+                fields = line.rstrip("\n").split("\t")
+                if len(fields) >= 3:
+                    sets[fields[0]] = [g for g in fields[2:] if g]
+    if gene_sets:
+        sets.update({str(k): list(v) for k, v in gene_sets.items()})
+    if not sets:
+        raise ValueError("Provide gene_sets or gmt_path.")
+    return sets
+
+
+@mcp.tool()
+def gene_set_test(
+    contrast: Optional[str] = None,
+    coef: Optional[int] = None,
+    gene_sets: Optional[dict] = None,
+    gmt_path: Optional[str] = None,
+    method: str = "camera",
+    n: int = 20,
+) -> str:
+    """Test gene sets for differential expression with camera or fry.
+
+    Uses the voom result if voom_transform() has been run, otherwise the
+    DGEList with its dispersions (run estimate_dispersion() first).
+
+    Args:
+        contrast: Contrast string, e.g. 'groupB - groupA'.
+        coef: 0-based coefficient index (alternative to contrast). Default:
+            the last coefficient.
+        gene_sets: Dictionary mapping set names to lists of gene IDs.
+        gmt_path: Path to a GMT file of gene sets (alternative to gene_sets).
+        method: 'camera' (competitive, default) or 'fry' (self-contained).
+        n: Number of top sets to report.
+    """
+    _require("dgelist", "DGEList")
+    _require("design", "design matrix")
+    d = _state["dgelist"]
+    if method not in ("camera", "fry"):
+        raise ValueError("method must be 'camera' or 'fry'.")
+
+    if _state["voom"] is not None:
+        y, source = _state["voom"]["EList"], "voom"
+    elif _state["dispersions_estimated"]:
+        y, source = d, "DGEList"
+    else:
+        raise ValueError("Run voom_transform() or estimate_dispersion() first.")
+
+    ids = d.get("_gene_ids")
+    if ids is None:
+        ids = [str(i) for i in range(d["counts"].shape[0])]
+    pos = {}
+    for i, g in enumerate(ids):
+        pos.setdefault(str(g), i)
+    index = {}
+    for name, genes in _read_gene_sets(gene_sets, gmt_path).items():
+        idx = sorted({pos[str(g)] for g in genes if str(g) in pos})
+        if idx:
+            index[name] = np.asarray(idx, dtype=int)
+    if not index:
+        raise ValueError("No gene set has any genes in the data.")
+
+    design = np.asarray(_state["design"], dtype=np.float64)
+    if contrast is not None:
+        con = _parse_contrast(contrast, _state["design_info"])
+        label = contrast
+    else:
+        con = design.shape[1] - 1 if coef is None else int(coef)
+        label = _state["design_info"][con]
+
+    fn = ep.camera if method == "camera" else ep.fry
+    table = fn(y, index, design=design, contrast=con)
+    name = f"{method}:{label.replace(' ', '')}"
+    _state["results"][name] = {"table": table, "gene_sets": True}
+    _state["last_result"] = name
+
+    lines = [
+        f"{method} on {source}: {label}",
+        f"Sets tested: {len(index)} (FDR < 0.05: {int((table['FDR'] < 0.05).sum())})",
+        "",
+        f"{'Set':<30} {'NGenes':>7} {'Dir':>5} {'PValue':>10} {'FDR':>10}",
+        "-" * 66,
+    ]
+    for set_name, row in table.head(n).iterrows():
+        sn = str(set_name)
+        if len(sn) > 29:
+            sn = sn[:27] + ".."
+        lines.append(
+            f"{sn:<30} {int(row['NGenes']):>7d} {str(row.get('Direction', '')):>5} "
+            f"{row['PValue']:>10.2e} {row['FDR']:>10.2e}"
+        )
+    return "\n".join(lines)
+
+
+# ===========================================================================
+# Methylation (paired-count binomial) tools
+# ===========================================================================
+
+_bin_state: dict = {
+    "pclist": None,     # PCList of methylated / unmethylated counts
+    "design": None,
+    "design_info": None,
+    "fit": None,        # bin_ql_fit result
+}
+
+
+@mcp.tool()
+def load_bismark(
+    files: list,
+    sample_names: Optional[list] = None,
+    group: Optional[list] = None,
+    min_coverage: int = 8,
+) -> str:
+    """Load Bismark coverage files as paired methylated/unmethylated counts.
+
+    Loci are kept when every sample has at least min_coverage reads, as in
+    the edgeR methylation workflow (Chen et al. 2018).
+
+    Args:
+        files: Bismark .cov or .cov.gz files, one per sample.
+        sample_names: Optional sample names. Default: file names.
+        group: Optional group for each sample.
+        min_coverage: Minimum total reads per locus in every sample.
+            Default 8; 0 keeps all loci.
+    """
+    y = ep.read_bismark2pc(files, sample_names=sample_names, verbose=False)
+    n_loci = y["counts"].shape[0]
+    cov = np.asarray(y["counts"]) + np.asarray(y["counts2"])
+    keep = np.all(cov >= min_coverage, axis=1)
+    if not keep.all():
+        y = y[np.flatnonzero(keep), :]
+    if group is not None:
+        if len(group) != y["counts"].shape[1]:
+            raise ValueError(f"group has {len(group)} values for {y['counts'].shape[1]} samples.")
+        y["samples"]["group"] = pd.Categorical([str(g) for g in group])
+
+    _bin_state.update(pclist=y, design=None, design_info=None, fit=None)
+    meth = np.asarray(y["counts"], dtype=float)
+    total = meth + np.asarray(y["counts2"], dtype=float)
+    beta = meth.sum(axis=0) / np.maximum(total.sum(axis=0), 1)
+    names = [str(x) for x in y["samples"].index]
+    lines = [
+        f"Loaded {n_loci:,} loci × {len(names)} samples; "
+        f"{int(keep.sum()):,} kept with coverage ≥ {min_coverage} in every sample",
+        "Overall methylation: " + ", ".join(f"{n} {b:.3f}" for n, b in zip(names, beta)),
+    ]
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def fit_bin_model(
+    formula: Optional[str] = None,
+    matrix: Optional[list] = None,
+    columns: Optional[list] = None,
+    robust: bool = True,
+) -> str:
+    """Fit quasi-binomial GLMs (edgeR 5.0's binQLFit) to the loaded loci.
+
+    Give either an R-style formula on the sample metadata (e.g. '~group')
+    or an explicit design matrix with its column names.
+
+    Args:
+        formula: Design formula. Default '~group' when neither is given.
+        matrix: Design matrix as a list of rows (samples × coefficients).
+        columns: Column names for matrix.
+        robust: Robust empirical Bayes for the quasi-dispersions. Default True.
+    """
+    y = _bin_state["pclist"]
+    if y is None:
+        raise ValueError("No methylation data loaded. Use load_bismark() first.")
+    if matrix is not None:
+        design = np.asarray(matrix, dtype=np.float64)
+        col_names = list(columns) if columns is not None else [f"coef{i}" for i in range(design.shape[1])]
+    else:
+        import patsy
+        formula = formula or "~group"
+        dinfo = patsy.dmatrix(formula, data=y["samples"], return_type="dataframe")
+        design = np.asarray(dinfo, dtype=np.float64)
+        col_names = list(dinfo.columns)
+    if design.shape[0] != y["counts"].shape[1]:
+        raise ValueError(f"Design has {design.shape[0]} rows for {y['counts'].shape[1]} samples.")
+
+    fit = ep.bin_ql_fit(y, design=design, robust=robust)
+    _bin_state.update(design=design, design_info=col_names, fit=fit)
+    pdf = np.atleast_1d(fit.get("df.prior"))
+    return "\n".join([
+        f"Fitted quasi-binomial GLM: {fit['coefficients'].shape[0]:,} loci, {design.shape[1]} coefficients",
+        f"Prior df (median): {np.median(pdf):.2f}",
+        f"Coefficients: {', '.join(col_names)}",
+    ])
+
+
+@mcp.tool()
+def test_bin(
+    contrast: Optional[str] = None,
+    coef: Optional[int] = None,
+    lor: Optional[float] = None,
+    name: Optional[str] = None,
+) -> str:
+    """Test for differential methylation (edgeR 5.0's binQLFTest).
+
+    Results are stored with the other test results, so get_top_genes,
+    get_result_table and save_results work on them.
+
+    Args:
+        contrast: Contrast string on the design columns, e.g. 'groupB'.
+        coef: 0-based coefficient index (alternative to contrast). Default:
+            the last coefficient.
+        lor: Optional log2 odds-ratio threshold (TREAT/UPSHOT test).
+        name: Label for this result set.
+    """
+    fit = _bin_state["fit"]
+    if fit is None:
+        raise ValueError("No methylation model fitted. Use fit_bin_model() first.")
+    if contrast is not None:
+        res = ep.bin_ql_ftest(fit, contrast=_parse_contrast(contrast, _bin_state["design_info"]), lor=lor)
+        label = contrast
+    else:
+        c = fit["coefficients"].shape[1] - 1 if coef is None else int(coef)
+        res = ep.bin_ql_ftest(fit, coef=c, lor=lor)
+        label = _bin_state["design_info"][c]
+    if name is None:
+        name = "meth:" + label.replace(" ", "")
+    _state["results"][name] = res
+    _state["last_result"] = name
+
+    table = ep.top_tags(res, n=res["table"].shape[0])["table"]
+    fdr = table["FDR"].to_numpy(dtype=float)
+    lor_vals = table["logOR"].to_numpy(dtype=float)
+    return "\n".join([
+        f"Test: binomial QL F-test — {label}" + (f" (|logOR| > {lor})" if lor else ""),
+        f"Differentially methylated loci (FDR < 0.05): "
+        f"{int(((fdr < 0.05) & (lor_vals > 0)).sum())} up, "
+        f"{int(((fdr < 0.05) & (lor_vals < 0)).sum())} down",
+        f"Result name: {name} (use get_top_genes for the top loci)",
+    ])
+
+
 # ===========================================================================
 # Single-cell tools
 # ===========================================================================
@@ -1819,6 +2234,35 @@ _sc_state: dict = {
 # ---------------------------------------------------------------------------
 # SC Tool 1: load_sc_data
 # ---------------------------------------------------------------------------
+
+def _h5_strings(node) -> np.ndarray:
+    """Decode an h5ad string or categorical array: a plain dataset, or the
+    group encodings of anndata >= 0.8 (categorical, nullable-string-array)."""
+    import h5py
+    if isinstance(node, h5py.Dataset):
+        return np.array([v.decode() if isinstance(v, bytes) else v for v in node[:]], dtype=object)
+    if "codes" in node and "categories" in node:
+        cats = _h5_strings(node["categories"])
+        codes = node["codes"][:]
+        out = np.empty(len(codes), dtype=object)
+        ok = codes >= 0
+        out[ok] = cats[codes[ok]]
+        out[~ok] = None
+        return out
+    if "values" in node:
+        return _h5_strings(node["values"])
+    raise ValueError(f"Unsupported h5ad array encoding: {dict(node.attrs)}")
+
+
+def _h5_index(grp) -> np.ndarray:
+    """Row names of an h5ad obs/var dataframe group."""
+    key = grp.attrs.get("_index")
+    if isinstance(key, bytes):
+        key = key.decode()
+    if key is None or key not in grp:
+        key = "index" if "index" in grp else "_index"
+    return _h5_strings(grp[key])
+
 
 @mcp.tool()
 def load_sc_data(
@@ -1851,67 +2295,41 @@ def load_sc_data(
     h5 = h5py.File(h5ad_path, "r")
 
     # --- Read counts ---
-    if layer == "raw" and "raw" in h5:
-        x_grp = h5["raw"]["X"]
-        if isinstance(x_grp, h5py.Dataset):
-            # Dense
-            data = x_grp[:]
-            if log1p_transform:
-                data = np.round(np.expm1(data)).astype(np.float64)
-            counts_csr = None
-            counts_dense = data
-        else:
-            # Sparse
-            raw_data = h5["raw"]["X"]["data"][:]
-            if log1p_transform:
-                raw_data = np.round(np.expm1(raw_data)).astype(np.float64)
-            else:
-                raw_data = raw_data.astype(np.float64)
-            indices = h5["raw"]["X"]["indices"][:]
-            indptr = h5["raw"]["X"]["indptr"][:]
-            n_obs = len(indptr) - 1
-            # Gene names from raw
-            var_key = "index" if "index" in h5["raw"]["var"] else "_index"
-            gene_names = np.array([g.decode() if isinstance(g, bytes) else g
-                                   for g in h5["raw"]["var"][var_key][:]])
-            n_var = len(gene_names)
-            counts_csr = sp.csr_matrix((raw_data, indices, indptr),
-                                       shape=(n_obs, n_var))
-            counts_dense = None
+    use_raw = layer == "raw" and "raw" in h5
+    if use_raw:
+        x_node, var_grp = h5["raw"]["X"], h5["raw"]["var"]
+    elif layer in ("X", "raw"):
+        x_node, var_grp = h5["X"], h5["var"]
     else:
-        x_grp = h5["X"]
-        if isinstance(x_grp, h5py.Dataset):
-            data = x_grp[:]
-            if log1p_transform:
-                data = np.round(np.expm1(data)).astype(np.float64)
-            counts_csr = None
-            counts_dense = data
-        else:
-            raw_data = h5["X"]["data"][:]
-            if log1p_transform:
-                raw_data = np.round(np.expm1(raw_data)).astype(np.float64)
-            else:
-                raw_data = raw_data.astype(np.float64)
-            indices = h5["X"]["indices"][:]
-            indptr = h5["X"]["indptr"][:]
-            n_obs = len(indptr) - 1
-            var_key = "index" if "index" in h5["var"] else "_index"
-            gene_names = np.array([g.decode() if isinstance(g, bytes) else g
-                                   for g in h5["var"][var_key][:]])
-            n_var = len(gene_names)
-            counts_csr = sp.csr_matrix((raw_data, indices, indptr),
-                                       shape=(n_obs, n_var))
-            counts_dense = None
+        if "layers" not in h5 or layer not in h5["layers"]:
+            raise ValueError(f"Layer '{layer}' not found in {h5ad_path}.")
+        x_node, var_grp = h5["layers"][layer], h5["var"]
+    gene_names = _h5_index(var_grp)
 
-    # Gene names (if not set from raw)
-    if layer == "raw" and "raw" in h5:
-        var_key = "index" if "index" in h5["raw"]["var"] else "_index"
-        gene_names = np.array([g.decode() if isinstance(g, bytes) else g
-                               for g in h5["raw"]["var"][var_key][:]])
-    elif "gene_names" not in dir() or gene_names is None:
-        var_key = "index" if "index" in h5["var"] else "_index"
-        gene_names = np.array([g.decode() if isinstance(g, bytes) else g
-                               for g in h5["var"][var_key][:]])
+    if isinstance(x_node, h5py.Dataset):
+        data = x_node[:]
+        if log1p_transform:
+            data = np.round(np.expm1(data))
+        counts_csr = None
+        counts_dense = data.astype(np.float64)
+    else:
+        data = x_node["data"][:]
+        if log1p_transform:
+            data = np.round(np.expm1(data))
+        data = data.astype(np.float64)
+        indices = x_node["indices"][:]
+        indptr = x_node["indptr"][:]
+        enc = x_node.attrs.get("encoding-type", "csr_matrix")
+        if isinstance(enc, bytes):
+            enc = enc.decode()
+        if enc == "csc_matrix":
+            n_obs = int(x_node.attrs["shape"][0]) if "shape" in x_node.attrs else len(_h5_index(h5["obs"]))
+            counts_csr = sp.csc_matrix((data, indices, indptr),
+                                       shape=(n_obs, len(gene_names))).tocsr()
+        else:
+            counts_csr = sp.csr_matrix((data, indices, indptr),
+                                       shape=(len(indptr) - 1, len(gene_names)))
+        counts_dense = None
 
     # --- Read obs metadata ---
     obs_keys = [k for k in h5["obs"].keys() if k != "__categories"]
@@ -1923,7 +2341,10 @@ def load_sc_data(
                                     for c in raw_cats]
 
     def _decode_col(name):
-        codes = h5["obs"][name][:]
+        node = h5["obs"][name]
+        if isinstance(node, h5py.Group):
+            return _h5_strings(node)
+        codes = node[:]
         if name in categories:
             return np.array([categories[name][c] for c in codes])
         if codes.dtype.kind in ("S", "O"):
