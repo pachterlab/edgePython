@@ -808,6 +808,26 @@ api:
   # Normalization
   # -----------------------------------------------------------------
 
+  - name: norm_lib_sizes
+    kind: function
+    domain: normalization
+    module: edgepython.normalization
+    r_equivalent: normLibSizes
+    description: >-
+      Same function as calc_norm_factors, under edgeR's newer name.
+    params:
+      - name: counts
+        type: [DGEList, ndarray]
+      - name: method
+        type: str
+        default: TMM
+    returns:
+      type: [DGEList, ndarray]
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_edger5_parity.py
+
   - name: calc_norm_factors
     kind: function
     domain: normalization
@@ -1613,6 +1633,25 @@ api:
     citations:
       - mccarthy2012
 
+  - name: sample_weights
+    kind: function
+    domain: glm
+    module: edgepython.ql_weights
+    r_equivalent: sampleWeights
+    description: >-
+      Empirical sample quality weights from the adjusted unit deviances
+      of a glm_ql_fit fit (new QL method) or a binomial fit from bin_fit
+      or bin_ql_fit.
+    params:
+      - name: glmfit
+        type: [DGEGLM, DGEBIN]
+    returns:
+      type: ndarray
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_edger5_parity.py
+
   - name: glm_ql_fit
     kind: function
     domain: glm_fitting
@@ -2074,18 +2113,104 @@ api:
     r_equivalent: null
     description: >-
       Universal reader that auto-detects input type (ndarray, DataFrame,
-      CSV path, kallisto directory, AnnData, or DGEList passthrough) and
-      returns a DGEList.
+      count table, 10X directory, AnnData, R .rds object, or quantifier
+      output from kallisto, lr-kallisto, Salmon, oarfish or RSEM) and
+      returns a DGEList. Quantifier output is read with the catch_*
+      readers, by default without dividing the counts.
     params:
-      - name: x
-        type: [str, ndarray, DataFrame, DGEList, AnnData]
+      - name: data
+        type: [str, list, ndarray, DataFrame, DGEList, AnnData]
         required: true
+      - name: source
+        type: str
+        description: >-
+          kallisto, lr_kallisto, salmon, oarfish, rsem, 10x, table,
+          anndata, rds, sparse, matrix or dataframe; auto-detected if None.
+      - name: format
+        type: str
+        description: For kallisto, 'h5' or 'tsv'.
+      - name: group
+        type: list
+      - name: labels
+        type: list
+      - name: ngibbs
+        type: int
+        default: 100
+      - name: divide
+        type: bool
+        description: Divide quantifier counts by the overdispersions.
+        default: false
     returns:
       type: DGEList
     impl_status: complete
     test_status: tested
     test_files:
       - test_io.py
+      - test_edger5_parity.py
+
+  - name: dgelist_from_tximport
+    kind: function
+    domain: io
+    module: edgepython.io
+    r_equivalent: DGEListFromTximport
+    description: >-
+      Create a DGEList from tximport output, with transcript length
+      annotation, RTA overdispersions from inferential replicates
+      (dividing the counts by default) and offset.prior for raw counts.
+    params:
+      - name: txi
+        type: dict
+      - name: samples
+        type: DataFrame
+        default: null
+      - name: group
+        type: list
+        default: null
+      - name: genes
+        type: DataFrame
+        default: null
+      - name: remove_zeros
+        type: bool
+        default: false
+      - name: divide
+        type: bool
+        default: true
+    returns:
+      type: DGEList
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_edger5_parity.py
+
+  - name: dgelist_from_tximeta
+    kind: function
+    domain: io
+    module: edgepython.io
+    r_equivalent: DGEListFromTximeta
+    description: >-
+      Create a DGEList from tximeta output, given as a dict of assays (a
+      SummarizedExperiment-like object) or an AnnData.
+    params:
+      - name: txm
+        type: [dict, AnnData]
+      - name: samples
+        type: DataFrame
+        default: null
+      - name: group
+        type: list
+        default: null
+      - name: remove_zeros
+        type: bool
+        default: false
+      - name: divide
+        type: bool
+        default: true
+    returns:
+      type: DGEList
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_edger5_parity.py
 
   - name: to_anndata
     kind: function
@@ -2201,7 +2326,7 @@ api:
       type: [DGEList, dict]
     impl_status: complete
     test_status: tested
-    tests:
+    test_files:
       - test_edger5_parity.py
     citations:
       - baldoni2024a
@@ -2251,7 +2376,7 @@ api:
       type: [DGEList, dict]
     impl_status: complete
     test_status: tested
-    tests:
+    test_files:
       - test_edger5_parity.py
     citations:
       - baldoni2024a
@@ -2291,7 +2416,7 @@ api:
       type: [DGEList, dict]
     impl_status: complete
     test_status: tested
-    tests:
+    test_files:
       - test_edger5_parity.py
     citations:
       - baldoni2024a
@@ -2339,7 +2464,7 @@ api:
       type: [DGEList, dict]
     impl_status: complete
     test_status: tested
-    tests:
+    test_files:
       - test_edger5_parity.py
     citations:
       - baldoni2024a
@@ -2380,7 +2505,7 @@ api:
       type: [DGEList, dict]
     impl_status: complete
     test_status: tested
-    tests:
+    test_files:
       - test_edger5_parity.py
     citations:
       - baldoni2024a
@@ -2428,7 +2553,7 @@ api:
       type: [DGEList, dict]
     impl_status: complete
     test_status: tested
-    tests:
+    test_files:
       - test_edger5_parity.py
     citations:
       - baldoni2024a
@@ -2461,7 +2586,7 @@ api:
       type: [DGEList, dict]
     impl_status: complete
     test_status: tested
-    tests:
+    test_files:
       - test_edger5_parity.py
     citations:
       - baldoni2024a
@@ -2499,7 +2624,7 @@ api:
       type: [DGEList, dict]
     impl_status: complete
     test_status: tested
-    tests:
+    test_files:
       - test_edger5_parity.py
     citations:
       - baldoni2024a
@@ -2538,7 +2663,7 @@ api:
       type: [DGEList, dict]
     impl_status: complete
     test_status: tested
-    tests:
+    test_files:
       - test_edger5_parity.py
     citations:
       - baldoni2024a
@@ -2580,7 +2705,7 @@ api:
       type: [DGEList, dict]
     impl_status: complete
     test_status: tested
-    tests:
+    test_files:
       - test_edger5_parity.py
     citations:
       - baldoni2024a
@@ -2604,7 +2729,7 @@ api:
       type: [DGEList, dict]
     impl_status: complete
     test_status: tested
-    tests:
+    test_files:
       - test_edger5_parity.py
 
   - name: collapse_gencode_tx2gene
@@ -2624,7 +2749,7 @@ api:
       type: [DGEList, dict]
     impl_status: complete
     test_status: tested
-    tests:
+    test_files:
       - test_edger5_parity.py
 
   - name: make_pclist
@@ -2655,7 +2780,7 @@ api:
       type: PCList
     impl_status: complete
     test_status: tested
-    tests:
+    test_files:
       - test_edger5_parity.py
 
   - name: read_bismark2pc
@@ -2680,7 +2805,7 @@ api:
       type: PCList
     impl_status: complete
     test_status: tested
-    tests:
+    test_files:
       - test_edger5_parity.py
 
   - name: rowsum_pclist
@@ -2701,7 +2826,7 @@ api:
       type: PCList
     impl_status: complete
     test_status: tested
-    tests:
+    test_files:
       - test_edger5_parity.py
 
   - name: bin_fit
@@ -2735,7 +2860,7 @@ api:
       type: DGEBIN
     impl_status: complete
     test_status: tested
-    tests:
+    test_files:
       - test_edger5_parity.py
 
   - name: bin_ql_fit
@@ -2781,7 +2906,7 @@ api:
       type: DGEBIN
     impl_status: complete
     test_status: tested
-    tests:
+    test_files:
       - test_edger5_parity.py
 
   - name: bin_ql_ftest
@@ -2815,7 +2940,7 @@ api:
       type: DGELRT
     impl_status: complete
     test_status: tested
-    tests:
+    test_files:
       - test_edger5_parity.py
 
   - name: mbin_one_way
@@ -2848,7 +2973,7 @@ api:
       type: dict
     impl_status: complete
     test_status: tested
-    tests:
+    test_files:
       - test_edger5_parity.py
 
   - name: mbin_iwls
@@ -2879,7 +3004,7 @@ api:
       type: dict
     impl_status: complete
     test_status: tested
-    tests:
+    test_files:
       - test_edger5_parity.py
 
   - name: feature_counts_to_dgelist

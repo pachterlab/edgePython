@@ -1190,3 +1190,41 @@ def test_weights_argument_with_a_dgelist(name):
     with_arg = value(call(y, w))
     np.testing.assert_allclose(with_arg, value(call(stored, None)), rtol=1e-13)
     assert not np.allclose(with_arg, value(call(y, None)))
+
+
+@pytest.mark.parametrize("source, path, reader", [
+    ("salmon", "salmon", lambda p: ep.catch_salmon(p, divide=False, verbose=False)),
+    ("kallisto", "kallisto", lambda p: ep.catch_kallisto(p, divide=False, verbose=False)),
+    ("oarfish", "oarfish", lambda p: ep.catch_oarfish(p, divide=False, verbose=False)),
+    ("rsem", "rsem", lambda p: ep.catch_rsem(p, ngibbs=50, divide=False, verbose=False)),
+])
+def test_read_data_uses_the_catch_readers(source, path, reader):
+    import os
+    folder = str(QUANT / path)
+    expected = reader(folder)
+    if source == "oarfish":
+        args = folder
+    elif source == "rsem":
+        args = sorted(str(QUANT / path / f) for f in os.listdir(folder) if f.endswith(".isoforms.results"))
+    else:
+        args = sorted(str(QUANT / path / d) for d in os.listdir(folder))
+    y = ep.read_data(args, source=source, ngibbs=50, group=["a", "b", "b"], verbose=False)
+    # Counts as quantified (divide=False), with the readers' annotation
+    np.testing.assert_array_equal(y["counts"], expected["counts"])
+    import pandas.testing as pdt
+    pdt.assert_frame_equal(y["genes"], expected["genes"])
+    assert list(y["samples"]["group"]) == ["a", "b", "b"]
+    np.testing.assert_allclose(ep.read_data(args, source=source, ngibbs=50, divide=True, verbose=False)["counts"],
+                               expected["counts"] / expected["genes"]["Overdispersion"].to_numpy()[:, None])
+
+
+def test_read_data_detects_lr_kallisto_and_kallisto_tsv():
+    y = ep.read_data(str(QUANT / "lr_kallisto" / "dirs"), labels=["x", "y", "z"], verbose=False)
+    np.testing.assert_array_equal(
+        y["counts"], ep.catch_lr_kallisto(str(QUANT / "lr_kallisto" / "dirs"), divide=False, verbose=False)["counts"])
+    assert list(y["samples"].index) == ["x", "y", "z"]
+    dirs = [str(QUANT / "kallisto" / f"k{j}") for j in (1, 2, 3)]
+    h5 = ep.read_data(dirs, source="kallisto", format="h5", verbose=False)
+    tsv = ep.read_data([str(QUANT / "kallisto_tsv" / f"k{j}") for j in (1, 2, 3)], source="kallisto",
+                       format="tsv", verbose=False)
+    np.testing.assert_allclose(tsv["genes"]["Overdispersion"], h5["genes"]["Overdispersion"], rtol=1e-14)

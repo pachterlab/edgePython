@@ -517,10 +517,12 @@ def _kallisto_sample(name, h5_file=None, tsv_file=None, boot_tsvs=(), verbose=Tr
             "tpm": 1e6 * x / x.sum(), "boot": boot, "type": "bootstrap"}
 
 
-def _kallisto_dir_sample(p, verbose):
+def _kallisto_dir_sample(p, verbose, fmt=None):
+    """One kallisto sample directory: abundance.h5 if present (or fmt='h5'),
+    otherwise abundance.tsv (fmt='tsv')."""
     name = os.path.basename(os.path.normpath(p))
     h5_file = os.path.join(p, "abundance.h5")
-    if os.path.exists(h5_file):
+    if fmt == "h5" or (fmt is None and os.path.exists(h5_file)):
         return _kallisto_sample(name, h5_file=h5_file, verbose=verbose)
     tsv_file = os.path.join(p, "abundance.tsv")
     if not os.path.exists(tsv_file):
@@ -537,9 +539,9 @@ def _numbered(pattern):
     return sorted(files, key=key)
 
 
-def _kallisto_samples(paths, verbose):
+def _kallisto_samples(paths, verbose, fmt=None):
     for p in paths:
-        yield _kallisto_dir_sample(p, verbose)
+        yield _kallisto_dir_sample(p, verbose, fmt)
 
 
 def _oarfish_prefixes(parent_dir, prefixes):

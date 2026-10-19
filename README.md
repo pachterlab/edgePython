@@ -102,7 +102,7 @@ Reading quantification output with bootstrap or Gibbs sampling uncertainty from 
 
 ### I/O
 
-- **Universal reader**: `read_data` with auto-detection for kallisto (H5/TSV), Salmon, oarfish, RSEM, 10X CellRanger, CSV/TSV count tables, AnnData (`.h5ad`), and RDS files.
+- **Universal reader**: `read_data` with auto-detection for kallisto (H5/TSV), lr-kallisto, Salmon, oarfish, RSEM, 10X CellRanger, CSV/TSV count tables, AnnData (`.h5ad`), and RDS files. Quantifier output is read with the `catch_*` readers.
 - **Specialized readers**: `read_dge` (collates per-sample count files), `read_10x` (10X Genomics output), `feature_counts_to_dgelist` (featureCounts output), `read_bismark2dge` (Bismark methylation coverage).
 - **Single-cell aggregation**: `seurat_to_pb` for pseudo-bulk aggregation.
 - **Export**: `to_anndata` for converting DGEList and results to AnnData format.
