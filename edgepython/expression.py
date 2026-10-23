@@ -263,6 +263,15 @@ def _ave_log_cpm_default(y, lib_size=None, offset=None, prior_count=2,
     if y.shape[0] == 0:
         return np.array([], dtype=np.float64)
 
+    # As edgeR: the all-zero short-circuit (aveLogCPM.R:71-76), conjunctive in lib.size
+    # and offset; without it the matrix reaches mglm_one_group's -1e8 sentinel.
+    if y.size and np.all(y == 0):
+        ls_ok = lib_size is None or np.max(np.asarray(lib_size, dtype=np.float64)) == 0
+        off_ok = offset is None or np.max(np.asarray(offset, dtype=np.float64)) == -np.inf
+        if ls_ok and off_ok:
+            abundance = (-np.log(y.shape[0]) + np.log(1e6)) / np.log(2)
+            return np.full(y.shape[0], abundance, dtype=np.float64)
+
     if dispersion is None:
         dispersion = 0.05
     dispersion = np.atleast_1d(np.asarray(dispersion, dtype=np.float64))
