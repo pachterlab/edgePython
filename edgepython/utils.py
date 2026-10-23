@@ -823,7 +823,9 @@ def binom_test(y1, y2, n1=None, n2=None, p=None):
             continue
         if size[i] > 10000:
             table = np.array([[y1[i], y2[i]], [n1 - y1[i], n2 - y2[i]]])
-            _, pv, _, _ = stats.chi2_contingency(table, correction=False)
+            # As edgeR: binomTest.R:35 calls chisq.test(table) with its default
+            # correct = TRUE, so Yates' continuity correction stays on.
+            _, pv, _, _ = stats.chi2_contingency(table, correction=True)
             pvalue[i] = pv
         else:
             # Method of small probabilities
