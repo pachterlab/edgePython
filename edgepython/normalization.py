@@ -297,7 +297,9 @@ def _calc_factor_tmmwsp(obs, ref, libsize_obs=None, libsize_ref=None,
     ref_p_shrunk = (ref + 0.5) / (libsize_ref + 0.5)
     M_shrunk = np.log2(obs_p_shrunk / ref_p_shrunk)
     o_M = np.lexsort((M_shrunk, M))
-    o_A = np.argsort(A)
+    # As edgeR: o.A <- order(A) is a stable sort (calcNormFactors.R:227). np.argsort's
+    # default quicksort is not, so tied genes moved in and out of the keep window below.
+    o_A = np.argsort(A, kind='mergesort')
 
     loM = int(n * logratio_trim) + 1
     hiM = n - loM
