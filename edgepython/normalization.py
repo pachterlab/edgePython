@@ -301,15 +301,17 @@ def _calc_factor_tmmwsp(obs, ref, libsize_obs=None, libsize_ref=None,
     # default quicksort is not, so tied genes moved in and out of the keep window below.
     o_A = np.argsort(A, kind='mergesort')
 
+    # As edgeR: hiM <- n + 1L - loM and hiA <- n + 1L - loA (calcNormFactors.R:231,235).
+    # Both windows are inclusive in R, so the 1-based o.M[loM:hiM] is [loM-1 : hiM] here.
     loM = int(n * logratio_trim) + 1
-    hiM = n - loM
+    hiM = n + 1 - loM
     keep_M = np.zeros(n, dtype=bool)
-    keep_M[o_M[loM:hiM]] = True
+    keep_M[o_M[loM - 1:hiM]] = True
 
     loA = int(n * sum_trim) + 1
-    hiA = n - loA
+    hiA = n + 1 - loA
     keep_A = np.zeros(n, dtype=bool)
-    keep_A[o_A[loA:hiA]] = True
+    keep_A[o_A[loA - 1:hiA]] = True
 
     keep = keep_M & keep_A
     M_keep = M[keep]
