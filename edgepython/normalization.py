@@ -64,8 +64,19 @@ def calc_norm_factors(counts, lib_size=None, method='TMM', ref_column=None,
         do_weighting=do_weighting, a_cutoff=a_cutoff, p=p)
 
 
-# Alias
-norm_lib_sizes = calc_norm_factors
+# normLibSizes is edgeR's canonical name; calcNormFactors the deprecated alias.
+def norm_lib_sizes(*args, **kwargs):
+    """Library-sizes-based normalization factors -- edgeR's canonical name.
+
+    Only ``normLibSizes.default`` rejects a negative count (``normLibSizes.R:36``);
+    the deprecated alias accepts one, so this is a wrapper, not an alias.
+    """
+    x = args[0] if args else kwargs.get('counts')
+    counts = x['counts'] if isinstance(x, dict) and 'counts' in x else x
+    arr = np.asarray(counts, dtype=np.float64)
+    if arr.size and np.min(arr) < 0:
+        raise ValueError("Negative counts not allowed")
+    return calc_norm_factors(*args, **kwargs)
 
 
 def _calc_norm_factors_default(x, lib_size=None, method='TMM', ref_column=None,
@@ -86,7 +97,9 @@ def _calc_norm_factors_default(x, lib_size=None, method='TMM', ref_column=None,
         if len(lib_size) != nsamples:
             if len(lib_size) > 1:
                 warnings.warn("length(lib_size) doesn't match number of samples")
-            lib_size = np.full(nsamples, lib_size[0] if len(lib_size) == 1 else lib_size.mean())
+            # As edgeR: lib.size <- rep_len(lib.size, nsamples) (calcNormFactors.R:42).
+            # np.resize on a 1-D array is rep_len; the mean is not.
+            lib_size = np.resize(np.asarray(lib_size, dtype=np.float64), nsamples)
 
     # Backward compatibility
     if method == 'TMMwzp':
