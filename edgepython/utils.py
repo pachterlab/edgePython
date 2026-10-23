@@ -828,10 +828,13 @@ def binom_test(y1, y2, n1=None, n2=None, p=None):
             _, pv, _, _ = stats.chi2_contingency(table, correction=True)
             pvalue[i] = pv
         else:
-            # Method of small probabilities
+            # As edgeR (binomTest.R:38-44): order(d) then cumsum, so the p-value is the
+            # sum of every d[j'] with d[j'] <= d[j] -- no tolerance, and order() is
+            # stable, so equal probabilities keep their adjacency.
             d = stats.binom.pmf(np.arange(size[i] + 1), size[i], p)
-            d_obs = stats.binom.pmf(y1[i], size[i], p)
-            pvalue[i] = np.sum(d[d <= d_obs + 1e-15])
+            o = np.argsort(d, kind='mergesort')
+            cumsump = np.cumsum(d[o])[np.argsort(o, kind='mergesort')]
+            pvalue[i] = cumsump[y1[i]]
 
     return np.minimum(pvalue, 1.0)
 
