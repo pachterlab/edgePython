@@ -14,6 +14,7 @@ from .expression import cpm
 
 _PRESETS = {
     'stringent': dict(min_count=10, min_total_count=15, large_n=10, min_prop=0.7, max_n_samples=40),
+    # moderate follows edgeR 4.99.8, the version the package's fixtures use (4.99.10 uses 6 / 10).
     'moderate': dict(min_count=2, min_total_count=8, large_n=4, min_prop=0.5, max_n_samples=20),
     'lenient': dict(min_count=1, min_total_count=6, large_n=2, min_prop=0.5, max_n_samples=10),
 }

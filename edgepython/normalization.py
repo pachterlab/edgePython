@@ -28,7 +28,7 @@ def calc_norm_factors(counts, lib_size=None, method='TMM', ref_column=None,
     method : str
         One of 'TMM', 'TMMwsp', 'RLE', 'upperquartile', 'none'.
     ref_column : int, optional
-        Reference column for TMM/TMMwsp.
+        Reference column for TMM/TMMwsp. 0-based; edgeR's refColumn = k + 1.
     logratio_trim : float
         Amount of trim for log-ratios (TMM).
     sum_trim : float
