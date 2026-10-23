@@ -684,7 +684,16 @@ def test_glm_lrt_on_a_matrix_fit_matches_edger():
 
 
 def test_norm_lib_sizes_is_calc_norm_factors():
-    assert ep.norm_lib_sizes is ep.calc_norm_factors
+    # edgeR 4.99.10 renamed calcNormFactors -> normLibSizes, keeping the old name as a
+    # deprecated alias, and put the negative-count guard only on normLibSizes.default
+    # (normLibSizes.R:36).  The two names give the same factors; the guard is not shared.
+    assert ep.norm_lib_sizes is not ep.calc_norm_factors
+    np.testing.assert_array_equal(ep.norm_lib_sizes(COUNTS), ep.calc_norm_factors(COUNTS))
+    negative = np.array([[5.0, 3.0], [2.0, -1.0], [0.0, 0.0], [8.0, 4.0]])
+    factors = ep.calc_norm_factors(negative)          # the alias has no such guard
+    assert factors.shape == (2,) and np.isfinite(factors).all()
+    with pytest.raises(ValueError, match="Negative counts not allowed"):
+        ep.norm_lib_sizes(negative)
 
 
 # DGEListFromTximport and DGEListFromTximeta
