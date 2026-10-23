@@ -300,11 +300,15 @@ def _ave_log_cpm_default(y, lib_size=None, offset=None, prior_count=2,
     return result
 
 
-def cpm_by_group(y, group=None, dispersion=0.05, offset=None, weights=None,
+def cpm_by_group(y, group=None, dispersion=None, offset=None, weights=None,
                  log=False, prior_count=2):
     """Counts per million averaged by group.
 
     Port of edgeR's cpmByGroup().
+
+    ``dispersion`` defaults to ``None`` and is then resolved as edgeR's
+    ``getDispersion(y)`` does -- tagwise, then trended, then common, then 0.05
+    (``getDispersion.R:6-17``, ``cpmByGroup.R:13-14``, ``:31``).
     """
     # DGEList input
     if isinstance(y, dict) and 'counts' in y:
@@ -318,10 +322,20 @@ def cpm_by_group(y, group=None, dispersion=0.05, offset=None, weights=None,
         if offset is None:
             from .dgelist import get_offset
             offset = get_offset(dge)
+        if dispersion is None:
+            # As edgeR: getDispersion(y) -- tagwise, then trended, then common
+            # (getDispersion.R:6-17); 0.05 only where the object carries none.
+            from .dgelist import get_dispersion
+            dispersion = get_dispersion(dge)
+            if dispersion is None:
+                dispersion = 0.05
         w = dge.get('weights')
         return _cpm_by_group_default(dge['counts'], group=group, dispersion=dispersion,
                                      offset=offset, weights=w, log=log,
                                      prior_count=prior_count)
+
+    if dispersion is None:
+        dispersion = 0.05
 
     return _cpm_by_group_default(y, group=group, dispersion=dispersion,
                                  offset=offset, weights=weights, log=log,
