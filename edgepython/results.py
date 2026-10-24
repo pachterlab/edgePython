@@ -2,7 +2,8 @@
 """
 Results processing for edgePython.
 
-Port of edgeR's topTags and decideTests.
+Port of edgeR's topTags and decideTests, and Lancaster aggregation of
+transcript p-values to genes (Yi et al. 2018).
 """
 
 import numpy as np
@@ -238,3 +239,181 @@ def decide_tests(obj, adjust_method='BH', p_value=0.05, lfc=0):
         is_de[small_fc] = 0
 
     return is_de
+
+
+# =====================================================================
+# Transcript-to-gene p-value aggregation
+# =====================================================================
+
+def lancaster(pvalues, weights):
+    """Lancaster's weighted combination of p-values.
+
+    Port of lancaster() from the aggregation R package (Yi et al. 2018).
+    Each p-value p_i with weight w_i contributes the upper chi-squared
+    quantile with w_i degrees of freedom; their sum is referred to the
+    chi-squared distribution with sum(w_i) degrees of freedom. Weights of 2
+    give Fisher's method.
+
+    Parameters
+    ----------
+    pvalues, weights : array-like
+        P-values and their weights, of the same length. NaN p-values and
+        weights <= 0 are dropped; a NaN weight gives NaN.
+
+    Returns
+    -------
+    float
+        The combined p-value: NaN if no p-values remain, the p-value
+        itself if one remains.
+    """
+    p = np.asarray(pvalues, dtype=np.float64).ravel()
+    w = np.asarray(weights, dtype=np.float64).ravel()
+    if p.shape != w.shape:
+        raise ValueError("Length of weights not equal to length of pvalues")
+    out = _lancaster_by(p, w, np.zeros(p.size, dtype=np.intp), 1)
+    return float(out[0])
+
+
+def _lancaster_by(p, w, codes, ngroups):
+    """lancaster() within each group of codes (0..ngroups-1)."""
+    keep = ~np.isnan(p) & ((w > 0) | np.isnan(w))
+    c, pk, wk = codes[keep], p[keep], w[keep]
+    n = np.bincount(c, minlength=ngroups)
+    t = np.bincount(c, weights=_chi2.isf(pk, wk), minlength=ngroups)
+    df = np.bincount(c, weights=wk, minlength=ngroups)
+    with np.errstate(invalid="ignore"):
+        out = _chi2.sf(t, df)
+    single = n == 1
+    out[single] = np.bincount(c, weights=pk, minlength=ngroups)[single]
+    out[n == 0] = np.nan
+    return out
+
+
+_GENE_COLUMNS = ("EnsG", "GeneID", "gene_id", "gene")
+
+
+def aggregate_tx_pvalues(res, y=None, gene=None, tx2gene=None, weights=None,
+                         remove_version=True, adjust_method="BH"):
+    """Gene-level p-values from transcript-level tests, by Lancaster's method.
+
+    An edgePython addition, following Yi et al. (2018): test transcripts
+    (e.g. from catch_kallisto, with exact_test or glm_ql_ftest), then
+    combine each gene's transcript p-values with lancaster().
+
+    Parameters
+    ----------
+    res : dict
+        Transcript-level test result with a 'table' holding PValue (and,
+        optionally, logFC), and 'genes' annotation, as from exact_test,
+        glm_ql_ftest or glm_lrt.
+    y : DGEList, optional
+        The DGEList that was tested, for the default weights.
+    gene : str or array-like, optional
+        Column of res['genes'] holding gene IDs, or the gene ID of each
+        transcript. By default the first of EnsG (unpacked Gencode names),
+        GeneID, gene_id and gene that res['genes'] has.
+    tx2gene : DataFrame or str, optional
+        Transcript-to-gene table, or path to one such as kb ref's t2g.txt,
+        matched to the transcript IDs (the row names of res['genes']), as
+        in catch_kallisto_gene. Used in place of gene.
+    weights : array-like or 'equal', optional
+        Weight of each transcript. By default sleuth's: each transcript's
+        mean over samples of log(normalized count + 0.5), the counts of y
+        scaled to the geometric mean of the effective library sizes;
+        transcripts with weight <= 0 are left out. 'equal' gives every
+        transcript weight 2, which is Fisher's method.
+    remove_version : bool
+        For tx2gene: remove version numbers from transcript and gene IDs.
+    adjust_method : str
+        Multiple testing adjustment over genes, as for top_tags.
+
+    Returns
+    -------
+    DataFrame, one row per gene in order of first appearance and indexed
+    by gene ID, with GeneID, GeneName (when known), NTx (transcripts
+    combined), PValue, FDR, and the transcript with the smallest p-value
+    (TopTx, with its TopTx.logFC when res has logFC).
+    """
+    table = res["table"]
+    p = table["PValue"].to_numpy(dtype=np.float64)
+    ntx = len(p)
+    ann = res.get("genes")
+    if ann is not None and len(ann) != ntx:
+        ann = None
+    if ann is not None and not isinstance(ann.index, pd.RangeIndex):
+        tx_ids = np.asarray(ann.index.astype(str), dtype=object)
+    else:
+        tx_ids = np.asarray(table.index.astype(str), dtype=object)
+
+    gene_names = None
+    if tx2gene is not None:
+        from .quant_readers import _gene_map
+        gene_ids, gene_ann = _gene_map(tx_ids, tx2gene, remove_version, verbose=False)
+        if gene_ann is not None and "GeneName" in gene_ann:
+            gene_names = gene_ann["GeneName"]
+    elif gene is not None and not isinstance(gene, str):
+        gene_ids = np.asarray(gene, dtype=object)
+        if len(gene_ids) != ntx:
+            raise ValueError(f"gene has {len(gene_ids)} values for {ntx} transcripts")
+    else:
+        if gene is None:
+            gene = next((c for c in _GENE_COLUMNS if ann is not None and c in ann), None)
+            if gene is None:
+                raise ValueError("No gene IDs in res['genes']; give gene= or tx2gene=")
+        elif ann is None or gene not in ann:
+            raise ValueError(f"Column '{gene}' not found in res['genes']")
+        gene_ids = ann[gene].astype(str).to_numpy(dtype=object)
+    if gene_names is None and ann is not None and "GeneName" in ann:
+        gene_names = pd.Series(ann["GeneName"].to_numpy(), index=gene_ids)
+        gene_names = gene_names[~gene_names.index.duplicated()]
+
+    if isinstance(weights, str):
+        if weights != "equal":
+            raise ValueError("weights must be an array or 'equal'")
+        w = np.full(ntx, 2.0)
+    elif weights is not None:
+        w = np.asarray(weights, dtype=np.float64)
+        if len(w) != ntx:
+            raise ValueError(f"weights has {len(w)} values for {ntx} transcripts")
+    else:
+        if y is None:
+            raise ValueError("Give y, the DGEList that was tested, for the default "
+                             "weights, or weights=")
+        counts = np.asarray(y["counts"], dtype=np.float64)
+        if counts.shape[0] != ntx:
+            raise ValueError(f"y has {counts.shape[0]} rows for {ntx} transcripts in res")
+        lib = (y["samples"]["lib.size"] * y["samples"]["norm.factors"]).to_numpy(dtype=np.float64)
+        scaled = counts * (np.exp(np.mean(np.log(lib))) / lib)
+        w = np.mean(np.log(scaled + 0.5), axis=1)
+
+    codes, genes = pd.factorize(pd.Series(gene_ids), sort=False)
+    ngene = len(genes)
+    pg = _lancaster_by(p, w, codes, ngene)
+    n_used = np.bincount(codes[~np.isnan(p) & ((w > 0) | np.isnan(w))], minlength=ngene)
+
+    fdr = np.full(ngene, np.nan)
+    ok = ~np.isnan(pg)
+    if ok.any():
+        method_map = {'BH': 'fdr_bh', 'BY': 'fdr_by', 'fdr': 'fdr_bh',
+                      'holm': 'holm', 'hochberg': 'hochberg',
+                      'hommel': 'hommel', 'bonferroni': 'bonferroni'}
+        if adjust_method == 'none':
+            fdr[ok] = pg[ok]
+        else:
+            _, fdr[ok], _, _ = multipletests(pg[ok], method=method_map.get(adjust_method,
+                                                                           adjust_method))
+
+    out = pd.DataFrame({"GeneID": np.asarray(genes, dtype=object)},
+                       index=pd.Index(np.asarray(genes, dtype=object)))
+    if gene_names is not None:
+        out["GeneName"] = gene_names.reindex(out.index).to_numpy()
+    out["NTx"] = n_used
+    out["PValue"] = pg
+    out["FDR"] = fdr
+    # Most significant transcript of each gene (first on ties)
+    order = np.lexsort((np.arange(ntx), np.where(np.isnan(p), np.inf, p), codes))
+    first = order[np.r_[True, codes[order][1:] != codes[order][:-1]]]
+    out["TopTx"] = tx_ids[first]
+    if "logFC" in table:
+        out["TopTx.logFC"] = table["logFC"].to_numpy()[first]
+    return out

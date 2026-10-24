@@ -62,7 +62,7 @@ from .exact_test import (
 )
 
 # --- Results ---
-from .results import top_tags, decide_tests
+from .results import top_tags, decide_tests, lancaster, aggregate_tx_pvalues
 
 # --- I/O ---
 from .io import (

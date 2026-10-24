@@ -429,6 +429,25 @@ citations:
       - read_bismark2dge
       - model_matrix_meth
 
+  - id: yi2018
+    authors:
+      - Yi L
+      - Pimentel H
+      - Bray NL
+      - Pachter L
+    year: 2018
+    title: >-
+      Gene-level differential analysis at transcript-level resolution
+    journal: Genome Biology
+    volume: 19
+    pages: "53"
+    contribution: >-
+      Lancaster aggregation of transcript-level p-values to gene-level
+      p-values.
+    functions:
+      - lancaster
+      - aggregate_tx_pvalues
+
   - id: baldoni2024a
     authors:
       - Baldoni PL
@@ -2324,6 +2343,77 @@ api:
       - test_treat.py
       - test_utilities.py
       - test_edger5_parity.py
+
+  - name: lancaster
+    kind: function
+    domain: results
+    module: edgepython.results
+    r_equivalent: "aggregation::lancaster"
+    description: >-
+      Lancaster's weighted combination of p-values: the sum of upper
+      chi-squared quantiles with the weights as degrees of freedom,
+      referred to chi-squared with their sum. Weights of 2 give Fisher's
+      method. Port of lancaster() from the aggregation R package.
+    params:
+      - name: pvalues
+        type: ndarray
+        required: true
+      - name: weights
+        type: ndarray
+        required: true
+    returns:
+      type: float
+    impl_status: complete
+    test_status: tested_r_comparison
+    test_files:
+      - test_lancaster.py
+    citations:
+      - yi2018
+
+  - name: aggregate_tx_pvalues
+    kind: function
+    domain: results
+    module: edgepython.results
+    r_equivalent: null
+    description: >-
+      edgePython addition. Gene-level p-values from a transcript-level test
+      result by Lancaster aggregation, with gene IDs from res['genes'] (EnsG
+      for Gencode names), a per-transcript array, or tx2gene (DataFrame or
+      a path such as kb ref's t2g.txt). Weights default to sleuth's (mean
+      log normalized count + 0.5, from y); 'equal' gives Fisher's method.
+      Returns one row per gene with NTx, PValue, FDR and the most
+      significant transcript (TopTx, TopTx.logFC).
+    params:
+      - name: res
+        type: dict
+        required: true
+      - name: y
+        type: DGEList
+        default: null
+      - name: gene
+        type: [str, ndarray]
+        default: null
+      - name: tx2gene
+        type: [DataFrame, str]
+        default: null
+      - name: weights
+        type: [ndarray, str]
+        default: null
+      - name: remove_version
+        type: bool
+        default: true
+      - name: adjust_method
+        type: str
+        default: BH
+        vocabulary: adjust_method
+    returns:
+      type: DataFrame
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_lancaster.py
+    citations:
+      - yi2018
 
   # -----------------------------------------------------------------
   # I/O
@@ -5041,11 +5131,11 @@ relationships:
 
 testing:
   framework: pytest
-  total_tests: 650
+  total_tests: 658
   test_directory: tests/
   conftest: tests/conftest.py
   data_directory: tests/data/
-  data_files: 237
+  data_files: 238
 
   test_files:
     - file: test_bismark.py
@@ -5154,7 +5244,7 @@ testing:
       includes_r_comparison: false
 
     - file: test_mcp_server.py
-      tests: 9
+      tests: 10
       domains: [io, glm_testing, splicing, gene_sets, binomial, single_cell]
       includes_r_comparison: false
       notes: Tests the MCP server (MCP/edgepython_server.py); skipped unless fastmcp is installed.
@@ -5164,6 +5254,12 @@ testing:
       domains: [io]
       includes_r_comparison: false
       notes: Real kallisto 0.52.0 and kb-python 0.30.2 output in data/kb, written by data/kb/make_kb_files.sh.
+
+    - file: test_lancaster.py
+      tests: 7
+      domains: [results]
+      includes_r_comparison: true
+      notes: lancaster() against the aggregation R package (reference values from data/lancaster.R).
 
   untested_functions:
     - get_dispersion_type
