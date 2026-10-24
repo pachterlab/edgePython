@@ -345,13 +345,17 @@ def test_estimate_disp_matches_edger5(case):
     # The APL grid warm-starts each dispersion from the previous one's
     # coefficients, as edgeR does
     e = DISP_CASES[case]()
+    # The classic estimators maximize with R's optimize() (tol eps^0.25), so a last-bit
+    # change in scipy's norm.logsf (scipy >= 1.16) moves them by ~1e-8; 1e-5 is still
+    # far inside the optimizer's own precision.
+    rtol = 1e-5 if case.startswith("disp_classic") else 1e-8
     for key, rkey in [("common.dispersion", "common"), ("trended.dispersion", "trended"),
                       ("tagwise.dispersion", "tagwise"), ("prior.df", "prior_df")]:
         if EDGER[case].get(rkey) in (None, [], {}):
             continue
         expected = _edger(case, rkey)
         actual = np.broadcast_to(np.asarray(e[key], dtype=np.float64), np.shape(expected))
-        _assert_close(actual, expected, rtol=1e-8)
+        _assert_close(actual, expected, rtol=rtol)
 
 
 def test_estimate_common_disp_classic_matches_edger():
@@ -406,9 +410,11 @@ def test_binned_trends_with_many_bins_match_edger(method):
     # dispBinTrend with 20 bins fits the spline or loess trend
     y = ep.estimate_glm_trended_disp(fresh(), _as_array(INPUTS["additive"]), method=method)
     _assert_close(y["trended.dispersion"], _edger(f"bigtrended_{method}"), rtol=1e-3)
-    # The classic estimateTrendedDisp, with 50 bins of estimateCommonDisp
+    # The classic estimateTrendedDisp, with 50 bins of estimateCommonDisp. Each bin is
+    # an optimize() fit, so scipy >= 1.16's last-bit change in norm.logsf moves the
+    # trend by ~1e-6 (see test_estimate_disp_matches_edger5)
     y = ep.estimate_trended_disp(ep.estimate_common_disp(fresh()), method=method)
-    _assert_close(y["trended.dispersion"], _edger(f"classic_trended_{method}"), rtol=1e-8)
+    _assert_close(y["trended.dispersion"], _edger(f"classic_trended_{method}"), rtol=1e-5)
 
 
 @pytest.mark.parametrize("design", ["oneway", "additive"])

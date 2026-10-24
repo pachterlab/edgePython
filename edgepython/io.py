@@ -1075,8 +1075,9 @@ def dgelist_from_tximeta(txm, samples=None, group=None, remove_zeros=False, divi
     as genes.
     """
     if hasattr(txm, 'layers') and hasattr(txm, 'var'):
+        # anndata >= 0.13 also lists X in layers under the key None; X is read below
         assays = {k: np.asarray(v.toarray() if hasattr(v, 'toarray') else v).T
-                  for k, v in txm.layers.items()}
+                  for k, v in txm.layers.items() if k is not None}
         if 'counts' not in assays and txm.X is not None:
             x = txm.X
             assays['counts'] = np.asarray(x.toarray() if hasattr(x, 'toarray') else x).T
