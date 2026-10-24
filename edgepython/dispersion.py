@@ -511,6 +511,19 @@ def WLEB(theta, loglik, prior_n=5, covariate=None, trend_method='locfit',
             # 'none'
             m0 = np.tile(np.mean(loglik, axis=0), (ntags, 1))
 
+    # As edgeR: make each row of m0 unimodal (estimateDisp.R:291-297), locfit.mixed only.
+    if trend_method == 'locfit.mixed' and m0.shape[1] >= 3:
+        for i in range(m0.shape[1], 2, -1):
+            # As edgeR: diff1_m0 <- m0[,i] - m0[,i-1]; diff2_m0 <- m0[,i-1] - m0[,i-2]
+            diff1 = m0[:, i - 1] - m0[:, i - 2]
+            diff2 = m0[:, i - 2] - m0[:, i - 3]
+            k = np.where((diff1 > 0) & (diff2 < 0))[0]
+            if k.size:
+                # As edgeR: m0[k, 1:(i-2)] <- m0[k, (i-1)] (estimateDisp.R:296).  R recycles
+                # the length-|k| vector column-major into the |k| x (i-2) target, so each row
+                # gets its own value; NumPy needs the explicit axis to do that.
+                m0[np.ix_(k, np.arange(0, i - 2))] = m0[k, i - 2][:, None]
+
     if trend:
         out['trend'] = maximize_interpolant(theta, m0)
 

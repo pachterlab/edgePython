@@ -111,6 +111,9 @@ def locfit_by_col(y, x=None, weights=1, span=0.5, degree=0):
 
     Port of edgeR's locfitByCol, following locfit's adaptive-tree
     evaluation for degree 0 and degree 1.
+
+    Only ``degree`` 0 and 1 are implemented; local-quadratic tree evaluation is not
+    ported, so ``degree = 2`` raises ``ValueError`` where R's ``locfit(deg = 2)`` fits.
     """
     y = np.asarray(y, dtype=np.float64)
     if y.ndim == 1:
@@ -124,6 +127,15 @@ def locfit_by_col(y, x=None, weights=1, span=0.5, degree=0):
 
     if span * n < 2 or n <= 1:
         return y.copy()
+
+    # As edgeR: the span*ntags < 2 || ntags <= 1 test at locfitByCol.R:9 precedes the
+    # locfit(deg=degree) call at :10, so a tiny input returns y whatever the degree.
+    if degree not in (0, 1):
+        raise ValueError(
+            f"locfit_by_col supports degree 0 or 1, not degree={degree}: local-quadratic "
+            "tree evaluation is not ported (edgeR's locfitByCol passes degree straight to "
+            "locfit, which accepts deg=2)"
+        )
 
     return _locfit_tree(x, y, weights, span, degree=degree)
 

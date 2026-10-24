@@ -28,7 +28,7 @@ def calc_norm_factors(counts, lib_size=None, method='TMM', ref_column=None,
     method : str
         One of 'TMM', 'TMMwsp', 'RLE', 'upperquartile', 'none'.
     ref_column : int, optional
-        Reference column for TMM/TMMwsp.
+        Reference column for TMM/TMMwsp. 0-based; edgeR's refColumn = k + 1.
     logratio_trim : float
         Amount of trim for log-ratios (TMM).
     sum_trim : float
@@ -64,8 +64,19 @@ def calc_norm_factors(counts, lib_size=None, method='TMM', ref_column=None,
         do_weighting=do_weighting, a_cutoff=a_cutoff, p=p)
 
 
-# Alias
-norm_lib_sizes = calc_norm_factors
+# normLibSizes is edgeR's canonical name; calcNormFactors the deprecated alias.
+def norm_lib_sizes(*args, **kwargs):
+    """Library-sizes-based normalization factors -- edgeR's canonical name.
+
+    Only ``normLibSizes.default`` rejects a negative count (``normLibSizes.R:36``);
+    the deprecated alias accepts one, so this is a wrapper, not an alias.
+    """
+    x = args[0] if args else kwargs.get('counts')
+    counts = x['counts'] if isinstance(x, dict) and 'counts' in x else x
+    arr = np.asarray(counts, dtype=np.float64)
+    if arr.size and np.min(arr) < 0:
+        raise ValueError("Negative counts not allowed")
+    return calc_norm_factors(*args, **kwargs)
 
 
 def _calc_norm_factors_default(x, lib_size=None, method='TMM', ref_column=None,
@@ -86,7 +97,9 @@ def _calc_norm_factors_default(x, lib_size=None, method='TMM', ref_column=None,
         if len(lib_size) != nsamples:
             if len(lib_size) > 1:
                 warnings.warn("length(lib_size) doesn't match number of samples")
-            lib_size = np.full(nsamples, lib_size[0] if len(lib_size) == 1 else lib_size.mean())
+            # As edgeR: lib.size <- rep_len(lib.size, nsamples) (calcNormFactors.R:42).
+            # np.resize on a 1-D array is rep_len; the mean is not.
+            lib_size = np.resize(np.asarray(lib_size, dtype=np.float64), nsamples)
 
     # Backward compatibility
     if method == 'TMMwzp':
@@ -297,17 +310,21 @@ def _calc_factor_tmmwsp(obs, ref, libsize_obs=None, libsize_ref=None,
     ref_p_shrunk = (ref + 0.5) / (libsize_ref + 0.5)
     M_shrunk = np.log2(obs_p_shrunk / ref_p_shrunk)
     o_M = np.lexsort((M_shrunk, M))
-    o_A = np.argsort(A)
+    # As edgeR: o.A <- order(A) is a stable sort (calcNormFactors.R:227). np.argsort's
+    # default quicksort is not, so tied genes moved in and out of the keep window below.
+    o_A = np.argsort(A, kind='mergesort')
 
+    # As edgeR: hiM <- n + 1L - loM and hiA <- n + 1L - loA (calcNormFactors.R:231,235).
+    # Both windows are inclusive in R, so the 1-based o.M[loM:hiM] is [loM-1 : hiM] here.
     loM = int(n * logratio_trim) + 1
-    hiM = n - loM
+    hiM = n + 1 - loM
     keep_M = np.zeros(n, dtype=bool)
-    keep_M[o_M[loM:hiM]] = True
+    keep_M[o_M[loM - 1:hiM]] = True
 
     loA = int(n * sum_trim) + 1
-    hiA = n - loA
+    hiA = n + 1 - loA
     keep_A = np.zeros(n, dtype=bool)
-    keep_A[o_A[loA:hiA]] = True
+    keep_A[o_A[loA - 1:hiA]] = True
 
     keep = keep_M & keep_A
     M_keep = M[keep]

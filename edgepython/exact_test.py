@@ -8,8 +8,8 @@ Port of edgeR's exactTest, equalizeLibSizes, q2qnbinom, splitIntoGroups.
 import math
 import numpy as np
 import pandas as pd
-from scipy.stats import nbinom, norm
-from scipy.special import gammaln, logsumexp
+from scipy.stats import nbinom, norm, gamma as gamma_dist
+from scipy.special import gammaln, logsumexp, erfcx
 from numba import njit
 
 from .utils import drop_empty_levels, binom_test
@@ -129,8 +129,10 @@ def exact_test(y, pair=None, dispersion='auto', rejection_region='doubletail',
     group = np.array([str(g) for g in group])
     unique_group_labels = np.array([str(g) for g in unique_groups])
 
-    # Get dispersion
-    if dispersion is None or dispersion == 'auto':
+    # Get dispersion.  The comparison must not be attempted on an array: `== 'auto'`
+    # on a per-gene vector raises "the truth value of an array … is ambiguous".
+    if dispersion is None or (not isinstance(dispersion, np.ndarray)
+                              and dispersion == 'auto'):
         from .dgelist import get_dispersion
         dispersion = get_dispersion(y)
         if dispersion is None:
@@ -422,6 +424,276 @@ def equalize_lib_sizes(y, group=None, dispersion=None, lib_size=None):
     return {'pseudo.counts': pseudo, 'pseudo.lib.size': common_lib_size}
 
 
+_LOG_SMALL = np.log(np.nextafter(0.0, 1.0))   # log of the smallest subnormal, ~ -744.44
+_INV_SQRT2 = 1.0 / np.sqrt(2.0)
+_SQRT_2_OVER_PI = np.sqrt(2.0 / np.pi)         # sqrt(2/pi); see _mills_slope
+_LOG_HALF = np.log(0.5)
+
+
+def _exp_ok(lp):
+    """Where exp(lp) is representable; below this it underflows to exactly 0."""
+    return np.isfinite(lp) & (lp > _LOG_SMALL)
+
+
+def _log_mills(z):
+    """log(Phi(-z)) = log(1/2) + log(erfcx(z/sqrt(2))) - z^2/2, exact into the far tail.
+
+    ``erfcx`` stays of order ``1/(z*sqrt(pi))`` where ``erfc`` underflows, so no truncation.
+    """
+    return _LOG_HALF + np.log(erfcx(z * _INV_SQRT2)) - 0.5 * z * z
+
+
+def _mills_slope(z):
+    """-d/dz log(Phi(-z)) = sqrt(2/pi)/erfcx(z/sqrt(2)); positive, and ~z for large z."""
+    return _SQRT_2_OVER_PI / erfcx(z * _INV_SQRT2)
+
+
+def _log_gamma_sf(a, x, tol=1e-17, max_terms=1200):
+    """log Q(a,x) and d/dx log Q(a,x), from the asymptotic series in 1/x.
+
+    Valid where ``x >= 744`` and ``x > a``, which the far tail guarantees.
+    """
+    a = np.asarray(a, dtype=np.float64)
+    x = np.asarray(x, dtype=np.float64)
+    s = np.ones(x.shape, dtype=np.float64)
+    t = np.zeros(x.shape, dtype=np.float64)
+    term = np.ones(x.shape, dtype=np.float64)
+    for k in range(1, max_terms + 1):
+        term = term * (a - 1.0 - (k - 1)) / x
+        live = np.abs(term) > tol * np.abs(s)
+        if not np.any(live):
+            break
+        s = np.where(live, s + term, s)
+        t = np.where(live, t + k * term, t)
+    logq = -x + (a - 1.0) * np.log(x) - gammaln(a) + np.log(s)
+    dlogq = -1.0 + (a - 1.0) / x - t / (x * s)
+    return logq, dlogq
+
+
+def _log_gamma_cf(a, x, tol=1e-17, max_terms=400):
+    """log P(a,x) and d/dx log P(a,x), from the power series of the lower gamma.
+
+    Converges for every ``x``; needs about ``a/(a-x)`` terms.
+    """
+    a = np.asarray(a, dtype=np.float64)
+    x = np.asarray(x, dtype=np.float64)
+    s = np.ones(x.shape, dtype=np.float64)
+    t = np.zeros(x.shape, dtype=np.float64)
+    term = np.ones(x.shape, dtype=np.float64)
+    for k in range(1, max_terms + 1):
+        term = term * x / (a + k)
+        live = np.abs(term) > tol * np.abs(s)
+        if not np.any(live):
+            break
+        s = np.where(live, s + term, s)
+        t = np.where(live, t + k * term, t)
+    with np.errstate(divide="ignore"):
+        # x is 0 for a lower-tail entry, where the log density is -inf; that is the
+        # correct seed value, not a failure.
+        logp = -x + a * np.log(x) - gammaln(a + 1.0) + np.log(s)
+    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+        # x can be subnormal here (a = 1, deep tail), where a/x overflows to inf; the
+        # Newton step e/dlogp is then 0, which is the right answer for a degenerate slope.
+        dlogp = -1.0 + a / x + t / (x * s)
+    return logp, dlogp
+
+
+def _bisect_log_gamma(a, x, lo, hi, lp, logq, tol=1e-10, steps=60):
+    """Finish an upper-tail far-tail root that Newton did not converge, by bisection."""
+    bad = np.abs(logq - lp) > tol
+    if not np.any(bad):
+        return x
+    xb, lob, hib, ab, lpb = x[bad].copy(), lo[bad], hi[bad], a[bad], lp[bad]
+    for _ in range(steps):
+        lq, _ = _log_gamma_sf(ab, xb)
+        lob = np.where(lq > lpb, xb, lob)              # logQ decreasing in x
+        hib = np.where(lq < lpb, xb, hib)
+        xb = 0.5 * (lob + hib)
+    out = x.copy()
+    out[bad] = xb
+    return out
+
+
+def _bisect_log_gamma_cf(a, x, lo, hi, lp, logp, tol=1e-10, steps=60):
+    """Finish a lower-tail far-tail root that Newton did not converge, by bisection."""
+    bad = np.abs(logp - lp) > tol
+    if not np.any(bad):
+        return x
+    xb, lob, hib, ab, lpb = x[bad].copy(), lo[bad], hi[bad], a[bad], lp[bad]
+    for _ in range(steps):
+        lq, _ = _log_gamma_cf(ab, xb)
+        lob = np.where(lq < lpb, xb, lob)               # logP increasing in x
+        hib = np.where(lq > lpb, xb, hib)
+        xb = 0.5 * (lob + hib)
+    out = x.copy()
+    out[bad] = xb
+    return out
+
+
+def _gamma_logsf(x, a, scale):
+    """log sf of Gamma(a, scale) at x, in log space -- R's ``pgamma(log.p=TRUE)`` equivalent.
+
+    Replaces the entries where scipy's ``gamma.logsf`` has already underflowed to ``-inf``.
+    """
+    out = np.asarray(gamma_dist.logsf(x, a=a, scale=scale), dtype=np.float64)
+    bad = np.isneginf(out)
+    if np.any(bad):
+        lq, _ = _log_gamma_sf(np.asarray(a)[bad], np.asarray(x)[bad] / np.asarray(scale)[bad])
+        out = out.copy()
+        out[bad] = lq
+    return out
+
+
+def _gamma_logcdf(x, a, scale):
+    """log cdf of Gamma(a, scale) at x, in log space -- R's ``pgamma`` equivalent.
+
+    Same underflow, same fix; there ``P < 5e-324`` forces ``x/scale`` below ``a``.
+    """
+    out = np.asarray(gamma_dist.logcdf(x, a=a, scale=scale), dtype=np.float64)
+    bad = np.isneginf(out)
+    if np.any(bad):
+        lpc, _ = _log_gamma_cf(np.asarray(a)[bad], np.asarray(x)[bad] / np.asarray(scale)[bad])
+        out = out.copy()
+        out[bad] = lpc
+    return out
+
+
+def _norm_isf_logsf(lp):
+    """Standard-normal z with sf(z) = exp(lp), valid into the far tail.
+
+    Solves ``logPhi(-z) = lp`` by Newton where scipy's ``norm.isf(np.exp(lp))`` is ``inf``.
+    """
+    lp = np.asarray(lp, dtype=np.float64)
+    z = np.full(lp.shape, np.inf, dtype=np.float64)
+    m = _exp_ok(lp)
+    if np.any(m):
+        z[m] = norm.isf(np.exp(lp[m]))
+    h = np.isfinite(lp) & ~m
+    if np.any(h):
+        lph = lp[h]
+        t = np.sqrt(np.maximum(-2.0 * lph, 0.0))       # leading term, above the root
+        for _ in range(4):
+            slope = _mills_slope(t)                     # -d/dt logPhi(-t) > 0
+            t = t + (_log_mills(t) - lph) / slope       # Newton, logPhi(-z) = lp
+        z[h] = t
+    z[lp == -np.inf] = np.inf
+    return z
+
+
+def _norm_ppf_logcdf(lp):
+    """Standard-normal z with cdf(z) = exp(lp), valid into the far tail.
+
+    The same Newton solve on ``_log_mills``, since ``Phi(z) = Phi(-|z|)`` in the lower tail.
+    """
+    lp = np.asarray(lp, dtype=np.float64)
+    z = np.full(lp.shape, -np.inf, dtype=np.float64)
+    m = _exp_ok(lp)
+    if np.any(m):
+        z[m] = norm.ppf(np.exp(lp[m]))
+    h = np.isfinite(lp) & ~m
+    if np.any(h):
+        lph = lp[h]
+        t = np.sqrt(np.maximum(-2.0 * lph, 0.0))
+        for _ in range(4):
+            slope = _mills_slope(t)
+            t = t + (_log_mills(t) - lph) / slope
+        z[h] = -t
+    z[lp == -np.inf] = -np.inf
+    return z
+
+
+def _gamma_isf_logsf(lp, a, scale):
+    """Gamma upper-tail quantile z with sf(z) = exp(lp), valid into the far tail.
+
+    ``sf(z) = Q(a, z/scale)``. The leading term of the asymptotic series only seeds
+    safeguarded Newton on the full ``log Q = lp``, with bisection as the fallback.
+    """
+    lp = np.asarray(lp, dtype=np.float64)
+    a = np.asarray(a, dtype=np.float64)
+    scale = np.asarray(scale, dtype=np.float64)
+    z = np.full(np.broadcast(lp, a, scale).shape, np.inf, dtype=np.float64)
+    m = _exp_ok(lp)
+    if np.any(m):
+        z[m] = gamma_dist.isf(np.exp(lp[m]), a=a[m], scale=scale[m])
+    h = np.isfinite(lp) & ~m
+    if np.any(h):
+        lph, ah, sh = lp[h], a[h], scale[h]
+        # x = z/scale.  Seed with the leading term -lp, or with the normal approximation
+        # of Q near x ~ a, whichever is larger: the first is wrong for large shape.
+        x = np.maximum(-lph, ah + np.sqrt(np.maximum(-2.0 * lph * ah, 0.0)))
+        for _ in range(4):                              # fixed point of the leading term
+            x = (ah - 1.0) * np.log(x) - gammaln(ah) - lph
+        x = np.maximum(x, 1e-300)
+        lo = np.maximum(x - 128.0, np.maximum(ah, 1e-300))
+        hi = 2.0 * x + 128.0
+        for _ in range(8):
+            logq, dlogq = _log_gamma_sf(ah, x)
+            e = logq - lph
+            conv = np.abs(e) < 1e-13
+            if np.all(conv):
+                break
+            slope = -dlogq                              # > 0 for x > a - 1
+            lo = np.where(e > 0.0, x, lo)               # logQ decreasing: root above x
+            hi = np.where(e < 0.0, x, hi)
+            xn = x + e / slope
+            step = np.where((xn > lo) & (xn < hi), xn, 0.5 * (lo + hi))
+            x = np.where(conv, x, step)                 # converged entries stay put
+        logq, _ = _log_gamma_sf(ah, x)
+        x = _bisect_log_gamma(ah, x, lo, hi, lph, logq)
+        z[h] = sh * x
+    z[lp == -np.inf] = np.inf
+    return z
+
+
+def _gamma_ppf_logcdf(lp, a, scale):
+    """Gamma lower-tail quantile z with cdf(z) = exp(lp), valid into the far tail.
+
+    ``cdf(z) = P(a, z/scale)``. The closed form of the leading term drops the ``e^-x`` of
+    P's power series, so it only seeds safeguarded Newton on the full ``log P = lp``.
+    """
+    lp = np.asarray(lp, dtype=np.float64)
+    a = np.asarray(a, dtype=np.float64)
+    scale = np.asarray(scale, dtype=np.float64)
+    z = np.full(np.broadcast(lp, a, scale).shape, 0.0, dtype=np.float64)
+    m = _exp_ok(lp)
+    if np.any(m):
+        z[m] = gamma_dist.ppf(np.exp(lp[m]), a=a[m], scale=scale[m])
+    h = np.isfinite(lp) & ~m
+    if np.any(h):
+        lph, ah, sh = lp[h], a[h], scale[h]
+        x_closed = np.exp((lph + gammaln(ah + 1.0)) / ah)   # underflow to 0 is an answer too
+        x = np.zeros(np.broadcast(lph, ah, sh).shape, dtype=np.float64)
+        live = x_closed > 0.0
+        if np.any(live):
+            al, lpl = ah[live], lph[live]
+            # A large shape makes the closed form a poor start -- it drops -x, and the root
+            # is of order a there; the normal-tail start covers that case.  Both are below
+            # the root, so take the larger and bracket above it.
+            xl0 = x_closed[live]
+            wl = -_norm_ppf_logcdf(lpl)
+            nl = al - np.sqrt(al) * wl
+            xl = np.maximum(xl0, nl)
+            lo = xl                                       # logP(lo) < lp
+            hi = np.maximum(2.0 * xl0, nl + wl * wl)     # logP(hi) > lp
+            for _ in range(8):
+                logp, dlogp = _log_gamma_cf(al, xl)
+                e = logp - lpl
+                conv = np.abs(e) < 1e-13
+                if np.all(conv):
+                    break
+                hi = np.where(e > 0.0, xl, hi)          # logP increasing: root below xl
+                lo = np.where(e < 0.0, xl, lo)
+                xn = xl - e / dlogp
+                step = np.where((xn > lo) & (xn < hi), xn, 0.5 * (lo + hi))
+                xl = np.where(conv, xl, step)           # converged entries stay put
+            logp, _ = _log_gamma_cf(al, xl)
+            x = np.zeros(np.broadcast(lph, ah, sh).shape, dtype=np.float64)
+            x[live] = _bisect_log_gamma_cf(al, xl, lo, hi, lpl, logp)
+        z[h] = sh * x
+    z[lp == -np.inf] = 0.0
+    return z
+
+
 def q2q_nbinom(x, input_mean, output_mean, dispersion=0):
     """Quantile-to-quantile mapping between negative-binomial distributions.
 
@@ -470,22 +742,24 @@ def q2q_nbinom(x, input_mean, output_mean, dispersion=0):
         p1[i] = norm.logsf(x[i], loc=input_mean[i], scale=np.sqrt(np.maximum(vi[i], eps)))
         shape_i = input_mean[i] / np.maximum(ri[i], eps)
         scale_i = ri[i]
-        p2[i] = gamma_dist.logsf(x[i], a=shape_i, scale=scale_i)
-        q1[i] = norm.isf(np.exp(p1[i]), loc=output_mean[i], scale=np.sqrt(np.maximum(vo[i], eps)))
+        p2[i] = _gamma_logsf(x[i], shape_i, scale_i)
+        q1[i] = (output_mean[i]
+                 + np.sqrt(np.maximum(vo[i], eps)) * _norm_isf_logsf(p1[i]))
         shape_o = output_mean[i] / np.maximum(ro[i], eps)
         scale_o = ro[i]
-        q2[i] = gamma_dist.isf(np.exp(p2[i]), a=shape_o, scale=scale_o)
+        q2[i] = _gamma_isf_logsf(p2[i], a=shape_o, scale=scale_o)
 
     # Lower tail (x < input_mean)
     if np.any(j):
         p1[j] = norm.logcdf(x[j], loc=input_mean[j], scale=np.sqrt(np.maximum(vi[j], eps)))
         shape_i = input_mean[j] / np.maximum(ri[j], eps)
         scale_i = ri[j]
-        p2[j] = gamma_dist.logcdf(x[j], a=shape_i, scale=scale_i)
-        q1[j] = norm.ppf(np.exp(p1[j]), loc=output_mean[j], scale=np.sqrt(np.maximum(vo[j], eps)))
+        p2[j] = _gamma_logcdf(x[j], shape_i, scale_i)
+        q1[j] = (output_mean[j]
+                 + np.sqrt(np.maximum(vo[j], eps)) * _norm_ppf_logcdf(p1[j]))
         shape_o = output_mean[j] / np.maximum(ro[j], eps)
         scale_o = ro[j]
-        q2[j] = gamma_dist.ppf(np.exp(p2[j]), a=shape_o, scale=scale_o)
+        q2[j] = _gamma_ppf_logcdf(p2[j], a=shape_o, scale=scale_o)
 
     return (q1 + q2) / 2
 
