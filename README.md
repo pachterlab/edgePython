@@ -102,8 +102,8 @@ Reading quantification output with bootstrap or Gibbs sampling uncertainty from 
 
 ### I/O
 
-- **Universal reader**: `read_data` with auto-detection for kallisto (H5/TSV), lr-kallisto, Salmon, oarfish, RSEM, 10X CellRanger, CSV/TSV count tables, AnnData (`.h5ad`), and RDS files. Quantifier output is read with the `catch_*` readers.
-- **Specialized readers**: `read_dge` (collates per-sample count files), `read_10x` (10X Genomics output), `feature_counts_to_dgelist` (featureCounts output), `read_bismark2dge` (Bismark methylation coverage).
+- **Universal reader**: `read_data` with auto-detection for kallisto (H5/TSV), lr-kallisto, Salmon, oarfish, RSEM, 10X CellRanger, kb count, CSV/TSV count tables, AnnData (`.h5ad`), and RDS files. Quantifier output is read with the `catch_*` readers.
+- **Specialized readers**: `read_dge` (collates per-sample count files), `read_10x` (10X Genomics output), `read_kb` (kb count single-cell output), `feature_counts_to_dgelist` (featureCounts output), `read_bismark2dge` (Bismark methylation coverage).
 - **Single-cell aggregation**: `seurat_to_pb` for pseudo-bulk aggregation.
 - **Export**: `to_anndata` for converting DGEList and results to AnnData format.
 
@@ -135,9 +135,12 @@ edgePython includes some functionality that edgeR does not have:
 - **lr-kallisto**: `catch_lr_kallisto` and `catch_lr_kallisto_gene` read long-read quantifications from kallisto `quant-tcc`. Run with `-b` and `--matrix-to-directories` (or `--matrix-to-files`), the bootstraps give overdispersion estimates exactly as for kallisto.
 - **More gene-level readers**: `catch_oarfish_gene` (oarfish), and `catch_rsem_gene`, which uses the Gibbs summaries in RSEM's own `genes.results` files, so a gene-level reader is available for every supported quantifier.
 - **kallisto plaintext output**: `catch_kallisto` also reads `abundance.tsv` with plaintext bootstraps (`bs_abundance_*.tsv`); edgeR requires `abundance.h5`.
+- **kallisto run information**: `catch_kallisto` and `catch_kallisto_gene` return each sample's `run_info.json` (reads processed and pseudoaligned, kallisto and index versions, command line) as `y["run.info"]`, warn when samples were run with different kallisto or index versions, and stop when samples do not have the same transcripts.
+- **kb's t2g.txt**: the gene-level readers accept the path to a headerless transcript-to-gene file such as kb ref's `t2g.txt` as `tx2gene`, and take gene names from its third column.
+- **kb count single-cell output**: `read_kb` reads kb count (kallisto | bustools) output into a sparse AnnData, with the mature, nascent and ambiguous matrices of the nac workflow as layers, gene names, and kb's run information, ready for `seurat_to_pb` and `glm_sc_fit`.
 - **tximeta without R**: `dgelist_from_tximeta` accepts an AnnData or a dictionary of assays in place of a SummarizedExperiment.
 - **Universal reader and AnnData export**: `read_data` detects and reads quantifier output, 10X data, count tables, AnnData (`.h5ad`) and, with R installed, R `.rds` objects; `to_anndata` exports results.
-- **MCP server**: [MCP/edgepython_server.py](MCP/edgepython_server.py) lets AI agents run analyses through tool calls: differential expression (QL F-tests with or without fold-change thresholds, TREAT, LRT, exact tests, voom), quantifier output read with the `catch_*` readers, differential transcript usage, gene set tests (camera, fry), differential methylation (binomial QL models), ChIP-seq, and the single-cell mixed model. It requires `fastmcp` (`pip install fastmcp`).
+- **MCP server**: [MCP/edgepython_server.py](MCP/edgepython_server.py) lets AI agents run analyses through tool calls: differential expression (QL F-tests with or without fold-change thresholds, TREAT, LRT, exact tests, voom), quantifier output read with the `catch_*` readers (including kb's `t2g.txt` and kallisto run information), kb count output from several samples as single cells or pseudo-bulk (`load_kb`), differential transcript usage, gene set tests (camera, fry), differential methylation (binomial QL models), ChIP-seq, and the single-cell mixed model. It requires `fastmcp` (`pip install fastmcp`).
 
 ## edgeR bugs corrected in edgePython
 

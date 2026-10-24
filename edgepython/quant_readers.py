@@ -193,8 +193,12 @@ def _divide(counts, od, n_resampled, divide, verbose):
 
 
 def _make_output(counts, ann, names, od_prior, resample_type, divided, offset_prior,
-                 eff_len, dgelist, tpm=None):
-    """DGEList, or plain dict, as edgeR's catch* functions return them."""
+                 eff_len, dgelist, tpm=None, run_info=None):
+    """DGEList, or plain dict, as edgeR's catch* functions return them.
+
+    run_info (kallisto's per-sample run information) is stored as
+    'run.info', an edgePython addition, so that 'samples' stays as edgeR's.
+    """
     ids = list(ann.index)
     names = list(names)
     eff_df = None if eff_len is None else pd.DataFrame(eff_len, index=ids, columns=names)
@@ -207,6 +211,8 @@ def _make_output(counts, ann, names, od_prior, resample_type, divided, offset_pr
             out["tpm"] = pd.DataFrame(tpm, index=ids, columns=names)
         if eff_len is None:
             del out["effective.length"]
+        if run_info is not None:
+            out["run.info"] = run_info
         return out
 
     from .dgelist import make_dgelist
@@ -225,6 +231,8 @@ def _make_output(counts, ann, names, od_prior, resample_type, divided, offset_pr
         other["tpm"] = pd.DataFrame(tpm, index=ids, columns=names)
     if other:
         y["other"] = other
+    if run_info is not None:
+        y["run.info"] = run_info
     return y
 
 
@@ -256,7 +264,7 @@ def _assemble_tx(samples, length_name="Length", has_eff_len=True, impute_eff_len
     capture, a dict, receives the transcript IDs as read and the first
     sample's effective lengths.
     """
-    names, types = [], []
+    names, types, runs = [], [], []
     n_resampled = 0
     for j, s in enumerate(samples):
         if j == 0:
@@ -264,7 +272,10 @@ def _assemble_tx(samples, length_name="Length", has_eff_len=True, impute_eff_len
             length = s["length"]
             cols_counts, cols_eff = [], []
             od = _Overdispersion(len(ids))
+        else:
+            _check_same_ids(s, ids, names[0])
         names.append(s["name"])
+        runs.append(s.get("run"))
         types.append(s["type"])
         cols_counts.append(np.asarray(s["counts"], dtype=np.float64))
         if has_eff_len:
@@ -311,7 +322,8 @@ def _assemble_tx(samples, length_name="Length", has_eff_len=True, impute_eff_len
     op = None
     if offset_prior and log_len is not None:
         op = log_len - log_len.mean(axis=1, keepdims=True)
-    return _make_output(counts, ann, names, od_prior, types, divided, op, eff_len, dgelist)
+    return _make_output(counts, ann, names, od_prior, types, divided, op, eff_len, dgelist,
+                        run_info=_run_info_frame(runs, names))
 
 
 def _gene_map(tx_ids, tx2gene, remove_version, verbose):
@@ -326,6 +338,11 @@ def _gene_map(tx_ids, tx2gene, remove_version, verbose):
         txann = split_gencode_tx_names(tx_ids, remove_version=remove_version)
         return np.asarray(txann["EnsG"], dtype=object), collapse_gencode_tx2gene(txann)
 
+    # A path is a headerless TSV such as kb ref's t2g.txt (transcript, gene,
+    # gene name, ...); its third column is kept as the genes' GeneName
+    from_file = isinstance(tx2gene, (str, os.PathLike))
+    if from_file:
+        tx2gene = pd.read_csv(tx2gene, sep="\t", header=None, dtype=str, keep_default_na=False)
     tx2gene = pd.DataFrame(tx2gene)
     if tx2gene.shape[1] < 2:
         raise ValueError("tx2gene doesn't have two columns")
@@ -343,7 +360,15 @@ def _gene_map(tx_ids, tx2gene, remove_version, verbose):
         raise ValueError("Tx names not found in first column of tx2gene")
     if verbose:
         print("Summarizing to genewise counts using tx2gene")
-    return gene_col[pos], None
+    gene_ann = None
+    if from_file and tx2gene.shape[1] >= 3:
+        ens_g = gene_col[pos]
+        codes, genes = pd.factorize(ens_g, sort=False)
+        first = np.unique(codes, return_index=True)[1]
+        name_col = tx2gene.iloc[:, 2].to_numpy(dtype=object)[pos]
+        gene_ann = pd.DataFrame({"GeneName": name_col[first]},
+                                index=pd.Index(np.asarray(genes, dtype=object)))
+    return gene_col[pos], gene_ann
 
 
 def _gene_lengths(method, tpm, eff_tx, codes, ngene, ntx_per_gene, gene_counts):
@@ -383,10 +408,11 @@ def _assemble_gene(samples, tx2gene=None, remove_version=True, has_eff_len=True,
                    impute_eff_len=True, gene_length="moderate", divide=True,
                    offset_prior=True, dgelist=True, verbose=True):
     """Gene-level output, as catchSalmonGene/catchKallistoGene."""
-    names, types = [], []
+    names, types, runs = [], [], []
     n_resampled = 0
     for j, s in enumerate(samples):
         if j == 0:
+            ids = np.asarray(s["ids"], dtype=object)
             ens_g, gene_ann = _gene_map(s["ids"], tx2gene, remove_version, verbose)
             codes, genes = pd.factorize(ens_g, sort=False)
             ngene, ntx = len(genes), len(ens_g)
@@ -394,8 +420,11 @@ def _assemble_gene(samples, tx2gene=None, remove_version=True, has_eff_len=True,
             length = None if s["length"] is None else np.asarray(s["length"], dtype=np.float64)
             cols_counts, cols_tpm, cols_eff = [], [], []
             od = _Overdispersion(ngene)
+        else:
+            _check_same_ids(s, ids, names[0])
         names.append(s["name"])
         types.append(s["type"])
+        runs.append(s.get("run"))
         cols_counts.append(_rowsum(np.asarray(s["counts"], dtype=np.float64)[:, None], codes, ngene)[:, 0])
         if has_eff_len:
             cols_tpm.append(np.asarray(s["tpm"], dtype=np.float64))
@@ -433,7 +462,7 @@ def _assemble_gene(samples, tx2gene=None, remove_version=True, has_eff_len=True,
     if offset_prior and log_len is not None:
         op = log_len - log_len.mean(axis=1, keepdims=True)
     return _make_output(counts, ann, names, od_prior, types, divided, op, eff_gene,
-                        dgelist, tpm=tpm_gene)
+                        dgelist, tpm=tpm_gene, run_info=_run_info_frame(runs, names))
 
 
 # =====================================================================
@@ -491,9 +520,54 @@ def _salmon_samples(paths, verbose):
                "tpm": q["TPM"].to_numpy(), "boot": boot, "type": samp_type}
 
 
+_H5_RUN_INFO = {"num_bootstrap": "n_bootstraps", "num_processed": "n_processed",
+                "kallisto_version": "kallisto_version", "index_version": "index_version",
+                "start_time": "start_time", "call": "call"}
+
+
+def _kallisto_run_info(sample_dir, aux=None):
+    """kallisto's run_info.json for one sample, or the same fields from the
+    abundance.h5 aux group when there is no run_info.json (the h5 lacks the
+    pseudoalignment counts)."""
+    p = os.path.join(sample_dir, "run_info.json")
+    if os.path.exists(p):
+        with open(p) as f:
+            return json.load(f)
+    if aux is None:
+        return None
+    info = {}
+    for key, name in _H5_RUN_INFO.items():
+        if key in aux:
+            v = np.asarray(aux[key][()]).ravel()[0]
+            info[name] = v.decode() if isinstance(v, bytes) else v.item()
+    return info or None
+
+
+def _run_info_frame(runs, names):
+    """One row per sample of kallisto run information, or None; warns when the
+    samples were run with different kallisto or index versions."""
+    if all(r is None for r in runs):
+        return None
+    info = pd.DataFrame([r or {} for r in runs], index=pd.Index(names))
+    for col in ("kallisto_version", "index_version"):
+        if col in info and info[col].dropna().nunique() > 1:
+            warnings.warn(f"Samples were quantified with different {col}s: "
+                          + ", ".join(f"{n}={v}" for n, v in info[col].items()))
+    return info
+
+
+def _check_same_ids(s, ids, first_name):
+    """Every sample must have the first sample's targets in the same order."""
+    other = s.get("ids")
+    if other is not None and not np.array_equal(np.asarray(other, dtype=object), ids):
+        raise ValueError(f"Sample {s['name']} does not have the same transcripts, in the same "
+                         f"order, as {first_name}; were they quantified with the same index?")
+
+
 def _kallisto_sample(name, h5_file=None, tsv_file=None, boot_tsvs=(), verbose=True):
     """One kallisto sample from abundance.h5, or from abundance.tsv with
     any plaintext bootstraps (bs_abundance_*.tsv)."""
+    run = None
     if h5_file is not None:
         try:
             import h5py
@@ -512,6 +586,7 @@ def _kallisto_sample(name, h5_file=None, tsv_file=None, boot_tsvs=(), verbose=Tr
             if n_boot > 0:
                 boot = np.column_stack([np.asarray(f["bootstrap"][k][:], dtype=np.float64)
                                         for k in f["bootstrap"].keys()])
+            run = _kallisto_run_info(os.path.dirname(h5_file), aux)
     else:
         q = pd.read_csv(tsv_file, sep="\t")
         ids = q["target_id"].astype(str).to_numpy(dtype=object)
@@ -523,11 +598,12 @@ def _kallisto_sample(name, h5_file=None, tsv_file=None, boot_tsvs=(), verbose=Tr
         if n_boot:
             boot = np.column_stack([pd.read_csv(b, sep="\t")["est_counts"].to_numpy(dtype=np.float64)
                                     for b in boot_tsvs])
+        run = _kallisto_run_info(os.path.dirname(tsv_file))
     if verbose:
         print(f"Reading {name}, {len(ids)} transcripts, {n_boot} bootstraps")
     x = counts / eff_len
     return {"name": name, "ids": ids, "length": length, "counts": counts, "eff_len": eff_len,
-            "tpm": 1e6 * x / x.sum(), "boot": boot, "type": "bootstrap"}
+            "tpm": 1e6 * x / x.sum(), "boot": boot, "type": "bootstrap", "run": run}
 
 
 def _kallisto_dir_sample(p, verbose, fmt=None):
@@ -788,9 +864,11 @@ def catch_salmon_gene(parent_dir=None, sample_dirs=None, tx2gene=None, remove_ve
     ----------
     parent_dir, sample_dirs : optional
         As for catch_salmon.
-    tx2gene : DataFrame, optional
+    tx2gene : DataFrame or str, optional
         Transcript IDs (first column) and gene IDs (second column).
-        Without it, genes are read from Gencode transcript names.
+        Without it, genes are read from Gencode transcript names. A path is
+        read as a headerless tab-separated file, such as kb ref's t2g.txt;
+        its third column, when present, becomes genes['GeneName'].
     remove_version : bool
         Remove version numbers from transcript and gene IDs.
     gene_length : str
@@ -816,6 +894,12 @@ def catch_kallisto(parent_dir=None, sample_dirs=None, dgelist=True, divide=True,
     plaintext bootstraps (bs_abundance_*.tsv). Arguments as for
     catch_salmon; by default every subdirectory of parent_dir holding
     abundance.h5 or abundance.tsv is read.
+
+    As edgePython additions, each sample's run_info.json (or, without it,
+    the run fields of abundance.h5) is returned as 'run.info', one row
+    per sample, with a warning when the samples were run with different
+    kallisto or index versions; and samples must have the same
+    transcripts in the same order.
     """
     old_style, sample_dirs, verbose = _legacy(paths, verbose, sample_dirs)
     if paths is not None:
@@ -835,7 +919,8 @@ def catch_kallisto_gene(parent_dir=None, sample_dirs=None, tx2gene=None, remove_
     """Read kallisto quantifications and summarize them to genes.
 
     Port of edgeR 5.0's catchKallistoGene(). Arguments as for
-    catch_salmon_gene and catch_kallisto.
+    catch_salmon_gene and catch_kallisto; tx2gene can be the path to kb
+    ref's t2g.txt, and 'run.info' is returned as by catch_kallisto.
     """
     paths = _sample_paths(parent_dir, sample_dirs, ["abundance.h5", "abundance.tsv"])
     return _assemble_gene(_kallisto_samples(paths, verbose), tx2gene=tx2gene,

@@ -15,6 +15,7 @@ import edgepython as ep
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 QUANT = os.path.join(ROOT, "tests", "data", "quant")
+KB = os.path.join(ROOT, "tests", "data", "kb")
 
 _spec = importlib.util.spec_from_file_location(
     "edgepython_server", os.path.join(ROOT, "MCP", "edgepython_server.py"))
@@ -220,3 +221,67 @@ def test_load_sc_data_legacy_layout(tmp_path):
     out = _sc_calls(path)
     assert "Loaded 60 genes × 60 cells, 4 samples" in out[0]
     assert "Wald test: fed" in out[4]
+
+
+def test_load_quant_reads_kb_t2g_and_reports_runs(tmp_path):
+    pytest.importorskip("h5py")
+    import shutil
+    out = call(("load_quant", {"source": "kallisto", "parent_dir": os.path.join(KB, "bulk"),
+                               "level": "gene", "tx2gene_path": os.path.join(KB, "t2g.txt")}))
+    assert "Loaded 6 genes × 3 samples" in out[0]
+    assert "kallisto runs:" in out[0]
+    assert "s2: 20,000 reads, 100.0% pseudoaligned, kallisto 0.52.0" in out[0]
+    assert list(srv._state["dgelist"]["genes"]["GeneName"]) == [f"GENE{g}" for g in range(1, 7)]
+    shutil.copytree(os.path.join(KB, "bulk"), tmp_path / "bulk")
+    p = tmp_path / "bulk" / "s3" / "run_info.json"
+    p.write_text(p.read_text().replace('"index_version": 13', '"index_version": 12'))
+    out = call(("load_quant", {"source": "kallisto", "parent_dir": str(tmp_path / "bulk")}))
+    assert "Warning: Samples were quantified with different index_versions" in out[0]
+
+
+def test_load_kb_single_cell():
+    pytest.importorskip("anndata")
+    dirs = [os.path.join(KB, d) for d in ("sc_std", "sc_nac", "sc_nac_sum", "sc_std")]
+    out = call(
+        ("load_kb", {"kb_dirs": dirs, "sample_names": ["a", "b", "c", "d"]}),
+        ("load_kb", {"kb_dirs": dirs, "sample_names": ["a", "b", "c", "d"], "min_counts": 50}),
+        ("set_sc_design", {"sample_covariates": {"fed": {"a": 1, "b": 0, "c": 1}}}, "error"),
+        ("set_sc_design", {"sample_covariates": {"fed": {"a": 1, "b": 0, "c": 1, "d": 0}}}),
+        ("fit_sc_model", {"verbose": False}),
+        ("test_sc_coef", {"coef": "fed"}),
+        ("load_kb", {"kb_dirs": dirs[:2], "sample_names": ["a", "a"]}, "error"),
+        ("load_kb", {"kb_dirs": [dirs[0], os.path.join(KB, "bulk")]}, "error"),
+    )
+    assert "Loaded 6 genes × 195 cells, 4 samples" in out[0]
+    assert "a: 50 cells" in out[0] and "b: 45 cells" in out[0]
+    assert "empty droplets, for a, c, d" in out[0]
+    assert "Loaded 6 genes × 180 cells, 4 samples" in out[1]
+    assert "a: 45 cells (of 50 barcodes)" in out[1] and "empty droplets" not in out[1]
+    assert "no value for: d" in out[2]
+    assert "Columns: Intercept, fed" in out[3]
+    assert srv._sc_state["design"]["fed"].tolist() == [1.0] * 45 + [0.0] * 45 + [1.0] * 45 + [0.0] * 45
+    assert "Wald test: fed" in out[5]
+    assert "unique" in out[6]
+    assert "No kb count output" in out[7]
+
+
+def test_load_kb_pseudobulk_and_load_data_auto():
+    pytest.importorskip("anndata")
+    from scipy.io import mmread
+    dirs = [os.path.join(KB, d) for d in ("sc_std", "sc_nac", "sc_nac_sum")]
+    out = call(
+        ("load_kb", {"kb_dirs": dirs, "mode": "pseudobulk", "layer": "nascent"}, "error"),
+        ("load_kb", {"kb_dirs": dirs[1:], "mode": "pseudobulk", "layer": "nascent",
+                     "group": ["x", "y"]}),
+    )
+    assert "single matrix" in out[0]
+    assert "Loaded 6 genes × 2 samples" in out[1]
+    assert "Context: pseudobulk" in out[1] and "isoform" not in out[1]
+    y = srv._state["dgelist"]
+    nascent = mmread(os.path.join(KB, "sc_nac", "counts_filtered", "cells_x_genes.nascent.mtx"))
+    np.testing.assert_allclose(y["counts"][:, 0], np.asarray(nascent.sum(axis=0)).ravel())
+    assert list(y["samples"].index) == ["sc_nac", "sc_nac_sum"]
+    assert list(y["samples"]["group"].astype(str)) == ["x", "y"]
+    assert list(y["genes"]["gene_name"]) == [f"GENE{g}" for g in range(1, 7)]
+    out = call(("load_data_auto", {"data": os.path.join(KB, "sc_std"), "verbose": False}))
+    assert "Loaded 6 genes × 50 samples" in out[0] and "Context: single_cell (kb count output)" in out[0]

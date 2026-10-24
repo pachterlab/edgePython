@@ -2534,6 +2534,39 @@ api:
     impl_status: complete
     test_status: untested
 
+  - name: read_kb
+    kind: function
+    domain: io
+    module: edgepython.io
+    r_equivalent: null
+    description: >-
+      edgePython addition. Read kb count (kallisto | bustools) single-cell
+      output (cells_x_genes matrices in counts_unfiltered/ or
+      counts_filtered/) into a sparse AnnData, with the nac workflow's
+      mature, nascent and ambiguous matrices as layers, gene names in var
+      and kb's run_info.json, inspect.json and kb_info.json in uns['kb'].
+      read_data detects kb output and returns it as a dense DGEList.
+    params:
+      - name: path
+        type: str
+      - name: layer
+        type: str
+        default: null
+        description: Matrix to use as X; by default mature + nascent + ambiguous, as in kb's h5ad.
+      - name: filtered
+        type: bool
+        default: null
+        description: Read counts_filtered/ (True) or counts_unfiltered/ (False); by default counts_filtered/ when present.
+      - name: verbose
+        type: bool
+        default: true
+    returns:
+      type: AnnData
+    impl_status: complete
+    test_status: tested
+    test_files:
+      - test_kallisto_readers.py
+
   - name: catch_salmon
     kind: function
     domain: io
@@ -2597,7 +2630,7 @@ api:
         type: list
         default: null
       - name: tx2gene
-        type: DataFrame
+        type: [DataFrame, str]
         default: null
       - name: remove_version
         type: bool
@@ -2637,7 +2670,10 @@ api:
     description: >-
       Read kallisto transcript quantifications (abundance.h5, or
       abundance.tsv with plaintext bootstraps) with bootstrap-based RTA
-      overdispersions.
+      overdispersions. As edgePython additions, returns each sample's
+      run_info.json (or the run fields of abundance.h5) as run.info, warns
+      when samples were run with different kallisto or index versions, and
+      requires the same transcripts in every sample.
     params:
       - name: parent_dir
         type: str
@@ -2670,6 +2706,7 @@ api:
     test_files:
       - test_edger5_parity.py
       - test_backward_compat.py
+      - test_kallisto_readers.py
     citations:
       - baldoni2024a
 
@@ -2680,7 +2717,9 @@ api:
     r_equivalent: catchKallistoGene
     description: >-
       Read kallisto quantifications summarized to genes, as
-      catch_salmon_gene.
+      catch_salmon_gene. tx2gene can be the path to kb ref's t2g.txt,
+      whose third column gives genes['GeneName']; run.info as for
+      catch_kallisto.
     params:
       - name: parent_dir
         type: str
@@ -2689,7 +2728,7 @@ api:
         type: list
         default: null
       - name: tx2gene
-        type: DataFrame
+        type: [DataFrame, str]
         default: null
       - name: remove_version
         type: bool
@@ -2778,7 +2817,7 @@ api:
         type: list
         default: null
       - name: tx2gene
-        type: DataFrame
+        type: [DataFrame, str]
         default: null
       - name: remove_version
         type: bool
@@ -2858,7 +2897,7 @@ api:
         type: list
         default: null
       - name: tx2gene
-        type: DataFrame
+        type: [DataFrame, str]
         default: null
       - name: remove_version
         type: bool
@@ -5002,11 +5041,11 @@ relationships:
 
 testing:
   framework: pytest
-  total_tests: 620
+  total_tests: 650
   test_directory: tests/
   conftest: tests/conftest.py
   data_directory: tests/data/
-  data_files: 194
+  data_files: 237
 
   test_files:
     - file: test_bismark.py
@@ -5115,10 +5154,16 @@ testing:
       includes_r_comparison: false
 
     - file: test_mcp_server.py
-      tests: 6
+      tests: 9
       domains: [io, glm_testing, splicing, gene_sets, binomial, single_cell]
       includes_r_comparison: false
       notes: Tests the MCP server (MCP/edgepython_server.py); skipped unless fastmcp is installed.
+
+    - file: test_kallisto_readers.py
+      tests: 12
+      domains: [io]
+      includes_r_comparison: false
+      notes: Real kallisto 0.52.0 and kb-python 0.30.2 output in data/kb, written by data/kb/make_kb_files.sh.
 
   untested_functions:
     - get_dispersion_type

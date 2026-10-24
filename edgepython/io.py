@@ -4,9 +4,10 @@ I/O functions for edgePython.
 
 Port of edgeR's readDGE, read10X, featureCountsToMatrix,
 catchSalmon, catchKallisto, catchRSEM, catchOarfish, DGEListFromTximport,
-DGEListFromTximeta.
+DGEListFromTximeta, and read_kb for kb count (kallisto | bustools) output.
 """
 
+import json
 import os
 import re
 import warnings
@@ -178,6 +179,134 @@ def read_10x(path='.', mtx=None, genes=None, barcodes=None, as_dgelist=True):
         return make_dgelist(y, genes=gene_df, samples=samples_df)
 
     return {'counts': y, 'genes': gene_df, 'samples': samples_df}
+
+
+_KB_MATRIX = re.compile(r"cells_x_genes(?:\.(\w+))?\.mtx$")
+_KB_NAC_LAYERS = ("mature", "nascent", "ambiguous")
+
+
+def _is_kb_dir(contents):
+    """kb count output, or one of its counts_* directories."""
+    return ('counts_unfiltered' in contents or 'counts_filtered' in contents
+            or any(_KB_MATRIX.match(f) for f in contents))
+
+
+def _kb_dirs(path, filtered):
+    """The counts directory of kb count output, and the run directory above it."""
+    if any(_KB_MATRIX.match(f) for f in os.listdir(path)):
+        return path, os.path.dirname(os.path.normpath(path))
+    have = [d for d in ('counts_filtered', 'counts_unfiltered')
+            if os.path.isdir(os.path.join(path, d))]
+    if not have:
+        raise FileNotFoundError(f"No kb count output (counts_unfiltered/) found in {path}")
+    if filtered is None:
+        sub = have[0]
+    else:
+        sub = 'counts_filtered' if filtered else 'counts_unfiltered'
+        if sub not in have:
+            raise FileNotFoundError(f"{sub}/ not found in {path}")
+    return os.path.join(path, sub), path
+
+
+def _read_lines(path):
+    with open(path) as f:
+        return f.read().splitlines()
+
+
+def read_kb(path, layer=None, filtered=None, verbose=True):
+    """Read kb count (kallisto | bustools) single-cell output into AnnData.
+
+    An edgePython addition. Reads the cells_x_genes matrices kb writes in
+    counts_unfiltered/ (and counts_filtered/ with --filter), keeping them
+    sparse, for seurat_to_pb pseudo-bulking and glm_sc_fit.
+
+    Parameters
+    ----------
+    path : str
+        kb count output directory (with counts_unfiltered/), or one of its
+        counts_* directories.
+    layer : str, optional
+        Matrix to use as X when kb wrote several (the nac workflow's
+        'mature', 'nascent' and 'ambiguous', and any of 'cell', 'nucleus'
+        and 'total' from --sum). By default X is mature + nascent +
+        ambiguous, as in kb's own h5ad.
+    filtered : bool, optional
+        Read counts_filtered/ (True) or counts_unfiltered/ (False). By
+        default counts_filtered/ when it exists.
+    verbose : bool
+        Print what is read.
+
+    Returns
+    -------
+    AnnData, cells x genes, with sparse float64 X. Every matrix of the nac
+    workflow is also a layer; var holds gene_name from
+    cells_x_genes.genes.names.txt; uns['kb'] holds kb's run_info.json,
+    inspect.json and kb_info.json.
+    """
+    try:
+        import anndata
+    except ImportError:
+        raise ImportError("anndata package required for read_kb. "
+                          "Install with: pip install anndata")
+    from scipy.io import mmread
+    from scipy.sparse import csr_matrix
+
+    counts_dir, run_dir = _kb_dirs(path, filtered)
+    mats = {}
+    for f in sorted(os.listdir(counts_dir)):
+        m = _KB_MATRIX.match(f)
+        if m:
+            mats[m.group(1)] = os.path.join(counts_dir, f)
+    if not mats:
+        raise FileNotFoundError(f"No cells_x_genes*.mtx found in {counts_dir}")
+
+    def read(p):
+        return csr_matrix(mmread(p), dtype=np.float64)
+
+    layers = {}
+    if None in mats:
+        # Standard workflow: a single cells_x_genes.mtx
+        if layer is not None:
+            raise ValueError(f"layer='{layer}' given, but {counts_dir} holds a single matrix")
+        X = read(mats[None])
+    else:
+        layers = {k: read(p) for k, p in mats.items()}
+        if layer is None:
+            missing = [k for k in _KB_NAC_LAYERS if k not in layers]
+            if missing:
+                raise ValueError(f"Choose layer= from {sorted(layers)}")
+            X = layers['mature'] + layers['nascent'] + layers['ambiguous']
+        elif layer in layers:
+            X = layers[layer].copy()
+        else:
+            raise ValueError(f"Layer '{layer}' not found. Available: {sorted(layers)}")
+
+    prefix = os.path.join(counts_dir, 'cells_x_genes')
+    barcodes = _read_lines(prefix + '.barcodes.txt')
+    genes = _read_lines(prefix + '.genes.txt')
+    if X.shape != (len(barcodes), len(genes)):
+        raise ValueError(f"Matrix is {X.shape[0]} x {X.shape[1]}, but there are "
+                         f"{len(barcodes)} barcodes and {len(genes)} genes")
+    var = pd.DataFrame(index=pd.Index(genes))
+    # kb writes gene names to counts_unfiltered/ only in some workflows
+    for d in (counts_dir, os.path.join(run_dir, 'counts_unfiltered')):
+        p = os.path.join(d, 'cells_x_genes.genes.names.txt')
+        if (os.path.exists(p)
+                and _read_lines(os.path.join(d, 'cells_x_genes.genes.txt')) == genes):
+            var['gene_name'] = _read_lines(p)
+            break
+    uns = {}
+    for name in ('run_info', 'inspect', 'kb_info'):
+        p = os.path.join(run_dir, name + '.json')
+        if os.path.exists(p):
+            with open(p) as f:
+                uns[name] = json.load(f)
+
+    if verbose:
+        extra = f", layers {', '.join(sorted(layers))}" if layers else ""
+        print(f"Reading {counts_dir}: {len(barcodes)} barcodes, {len(genes)} genes{extra}")
+    return anndata.AnnData(X=X, obs=pd.DataFrame(index=pd.Index(barcodes)), var=var,
+                           layers=layers or None, uns={'kb': uns} if uns else None)
 
 
 def feature_counts_to_dgelist(files):
@@ -700,6 +829,8 @@ def _auto_detect_source(data, fmt):
                 contents = os.listdir(data)
             except OSError:
                 raise ValueError(f"Cannot list directory: {data}")
+            if _is_kb_dir(contents):
+                return 'kb'
             if 'matrix.mtx' in contents or 'matrix.mtx.gz' in contents:
                 return '10x'
             if 'quant.sf' in contents:
@@ -783,8 +914,8 @@ def read_data(
         - list of str: paths to quantification directories
           (kallisto/salmon) or files (RSEM/oarfish/table)
         - str: path to .h5ad file, .rds file (DGEList/SummarizedExperiment/
-          DESeqDataSet), 10X directory, quantification directory, or
-          count table (.csv/.tsv/.txt)
+          DESeqDataSet), 10X directory, kb count output directory,
+          quantification directory, or count table (.csv/.tsv/.txt)
         - AnnData object: in-memory AnnData
         - DGEList: returned as-is (pass-through)
         - ndarray: count matrix (genes x samples)
@@ -794,9 +925,11 @@ def read_data(
     source : str or None
         Data source. Auto-detected if None.
         One of: 'kallisto', 'lr_kallisto', 'salmon', 'oarfish', 'rsem',
-        '10x', 'table', 'anndata', 'rds', 'sparse', 'matrix', 'dataframe'.
+        '10x', 'kb', 'table', 'anndata', 'rds', 'sparse', 'matrix', 'dataframe'.
         The quantifier sources use the catch_* readers (catch_kallisto,
-        catch_lr_kallisto, catch_salmon, catch_oarfish, catch_rsem).
+        catch_lr_kallisto, catch_salmon, catch_oarfish, catch_rsem); 'kb'
+        uses read_kb and returns its matrix as a dense DGEList (use read_kb
+        directly to keep single-cell counts sparse).
     format : str or None
         For kallisto: 'h5' or 'tsv'. If None, prefers H5 when available.
     path : str or None
@@ -812,7 +945,8 @@ def read_data(
     obs_col : str or None
         For AnnData: column in .obs to use as group factor.
     layer : str or None
-        For AnnData: layer name to use instead of .X.
+        For AnnData: layer name to use instead of .X. For kb: the nac
+        workflow matrix to read (see read_kb).
     ngibbs : int or array-like
         For RSEM: number of Gibbs samples per sample.
     divide : bool
@@ -858,6 +992,12 @@ def read_data(
     if source == '10x':
         p = data if isinstance(data, str) else path
         return read_10x(p, as_dgelist=True)
+
+    if source == 'kb':
+        p = data if isinstance(data, str) else path
+        adata = read_kb(p, layer=layer, verbose=verbose)
+        return _read_anndata(adata, group=group, labels=labels,
+                             obs_col=obs_col, layer=None, verbose=verbose)
 
     if source == 'sparse':
         shape = data.shape
