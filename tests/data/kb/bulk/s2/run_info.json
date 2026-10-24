@@ -1,0 +1,14 @@
+{
+	"n_targets": 9,
+	"n_bootstraps": 8,
+	"n_processed": 20000,
+	"n_pseudoaligned": 20000,
+	"n_unique": 12655,
+	"p_pseudoaligned": 100.0,
+	"p_unique": 63.3,
+	"kallisto_version": "0.52.0",
+	"index_version": 13,
+	"k-mer length": 31,
+	"start_time": "Sat Oct 24 11:23:13 2026",
+	"call": "kallisto quant -i std.idx -o bulk/s2 -b 8 bulk2_R1.fq.gz bulk2_R2.fq.gz"
+}

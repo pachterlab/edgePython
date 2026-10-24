@@ -62,7 +62,7 @@ from .exact_test import (
 )
 
 # --- Results ---
-from .results import top_tags, decide_tests
+from .results import top_tags, decide_tests, lancaster, aggregate_tx_pvalues
 
 # --- I/O ---
 from .io import (
@@ -70,6 +70,7 @@ from .io import (
     to_anndata,
     read_dge,
     read_10x,
+    read_kb,
     feature_counts_to_dgelist,
     read_bismark2dge,
     seurat_to_pb,

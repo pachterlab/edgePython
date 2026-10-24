@@ -1,0 +1,32 @@
+{
+    "workdir": ".",
+    "version": "0.30.2",
+    "kallisto": {
+        "path": "kallisto",
+        "version": "0.52.0"
+    },
+    "bustools": {
+        "path": "bustools",
+        "version": "0.45.1"
+    },
+    "start_time": "2026-10-24T11:23:16.835501",
+    "end_time": "2026-10-24T11:23:27.004544",
+    "elapsed": 10.169043,
+    "call": "kb count --kallisto kallisto --bustools bustools -x 10xv3 -w whitelist.txt -i std.idx -g t2g.txt -o sc_std sc_R1.fq.gz sc_R2.fq.gz",
+    "commands": [
+        "kallisto bus -i std.idx -o sc_std -x 10xv3 -t 8 sc_R1.fq.gz sc_R2.fq.gz",
+        "bustools sort -o sc_std/tmp/output.s.bus -T sc_std/tmp -t 8 -m 2G sc_std/output.bus",
+        "bustools inspect -o sc_std/inspect.json -w whitelist.txt sc_std/tmp/output.s.bus",
+        "bustools correct -o sc_std/tmp/output.s.c.bus -w whitelist.txt sc_std/tmp/output.s.bus",
+        "bustools sort -o sc_std/output.unfiltered.bus -T sc_std/tmp -t 8 -m 2G sc_std/tmp/output.s.c.bus",
+        "bustools count -o sc_std/counts_unfiltered/cells_x_genes -g t2g.txt -e sc_std/matrix.ec -t sc_std/transcripts.txt --genecounts --umi-gene sc_std/output.unfiltered.bus"
+    ],
+    "runtimes": [
+        1.1950831413269043,
+        1.6825129985809326,
+        1.116706132888794,
+        1.1371448040008545,
+        1.6579880714416504,
+        1.1143832206726074
+    ]
+}
