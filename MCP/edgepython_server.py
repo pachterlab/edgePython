@@ -13,6 +13,7 @@ Usage:
 import os
 import sys
 import re
+import warnings
 import numpy as np
 import pandas as pd
 from typing import Optional
@@ -39,11 +40,14 @@ mcp = FastMCP(
         "estimate_dispersion (or estimate_glm_robust_dispersion) → "
         "voom_transform (optional) → fit_model → test_contrast → "
         "get_top_genes / generate_plot / gene_set_test. Quantifier output "
-        "(salmon, kallisto, lr-kallisto, oarfish, RSEM): load_quant. DTU: "
+        "(salmon, kallisto, lr-kallisto, oarfish, RSEM): load_quant. kb count "
+        "(kallisto | bustools) runs, one per sample: load_kb, as single cells or "
+        "pseudo-bulk. DTU: "
         "load_quant → estimate_dispersion → dtu_diff_splice_dge or "
         "dtu_splice_variants. Methylation: load_bismark → fit_bin_model → "
         "test_bin → get_top_genes. "
-        "Single-cell workflow: load_sc_data → fit_sc_model → test_sc_coef → get_sc_top_genes. "
+        "Single-cell workflow: load_sc_data (or load_kb) → set_sc_design → fit_sc_model → "
+        "test_sc_coef → get_sc_top_genes. "
         "Use describe() or describe_sc() to see current pipeline state."
     ),
 )
@@ -151,6 +155,12 @@ def _infer_analysis_context(
         clues.append(str(data_input).lower())
 
     clue_text = " ".join(clues)
+
+    # kb count output: cells, or runs summed over cells
+    if src == "kb":
+        return "single_cell", "kb count output"
+    if src == "kb_pseudobulk":
+        return "pseudobulk", "kb count runs summed over cells"
 
     # Strong single-cell/10x signals.
     if src == "10x" or "10x" in clue_text or "cellranger" in clue_text:
@@ -408,9 +418,10 @@ def load_data_auto(
             this is ignored.
         data_list: Optional list of paths (e.g. quantification dirs).
         source: Data source (kallisto, lr_kallisto, salmon, oarfish, rsem,
-            10x, table, anndata, rds, sparse, matrix, dataframe).
+            10x, kb, table, anndata, rds, sparse, matrix, dataframe).
             Auto-detected if None. For quantifier output with edgeR 5.0's
-            annotation and gene-level summaries, use load_quant().
+            annotation and gene-level summaries, use load_quant(); for kb
+            count output from several samples, use load_kb().
         format: Source-specific format (e.g. 'h5' or 'tsv' for kallisto).
         path: Base path prefix for relative paths.
         group: Optional group assignments.
@@ -418,7 +429,8 @@ def load_data_auto(
         columns: For table format: (gene_id_col, count_col) 0-based indices.
         sep: Field separator for table/CSV files.
         obs_col: For AnnData: column in .obs to use as group factor.
-        layer: For AnnData: layer name to use instead of .X.
+        layer: For AnnData: layer name to use instead of .X. For kb: the
+            nac workflow matrix ('mature', 'nascent', 'ambiguous', ...).
         ngibbs: For RSEM: number of Gibbs samples per sample.
         divide: For quantifier output: divide counts by the estimated
             overdispersions. Default False.
@@ -447,6 +459,9 @@ def load_data_auto(
         verbose=verbose,
     )
 
+    if source is None and isinstance(data_input, str) and os.path.isdir(data_input) \
+            and ep.io._is_kb_dir(os.listdir(data_input)):
+        source = "kb"
     lines = _register_loaded(dgelist, source=source, data_input=data_input)
     return "\n".join(lines)
 
@@ -555,8 +570,9 @@ def load_quant(
             required for lr_kallisto, holding the quant-tcc output).
         level: 'transcript' (default) or 'gene'.
         tx2gene_path: For level='gene': TSV/CSV whose first two columns map
-            transcript IDs to gene IDs. Not needed for Gencode transcript
-            names, or for rsem, which uses its genes.results files.
+            transcript IDs to gene IDs, such as kb ref's t2g.txt (headerless;
+            its third column gives the gene names). Not needed for Gencode
+            transcript names, or for rsem, which uses its genes.results files.
         divide: Divide transcript counts by their overdispersions. Default True.
         group: Optional group assignment for each sample.
         verbose: Print progress messages.
@@ -580,11 +596,19 @@ def load_quant(
         if tx2gene_path is not None:
             if source == "rsem":
                 raise ValueError("rsem gene-level loading uses its genes.results files; omit tx2gene_path.")
-            sep = "," if tx2gene_path.endswith(".csv") else "\t"
-            kwargs["tx2gene"] = pd.read_csv(tx2gene_path, sep=sep)
-        dgelist = gene_reader(divide=divide, verbose=verbose, **kwargs)
-    else:
-        dgelist = tx_reader(divide=divide, verbose=verbose, **kwargs)
+            # A TSV path goes to the reader as it is, read without a header (a
+            # header row only adds an unused mapping) so kb's t2g.txt works
+            kwargs["tx2gene"] = (pd.read_csv(tx2gene_path) if tx2gene_path.endswith(".csv")
+                                 else tx2gene_path)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        if level == "gene":
+            dgelist = gene_reader(divide=divide, verbose=verbose, **kwargs)
+        else:
+            dgelist = tx_reader(divide=divide, verbose=verbose, **kwargs)
+    for w in caught:
+        if not str(w.message).startswith("Samples were quantified with different"):
+            warnings.warn_explicit(w.message, w.category, w.filename, w.lineno)
 
     if group is not None:
         if len(group) != dgelist["counts"].shape[1]:
@@ -600,6 +624,18 @@ def load_quant(
             f"range {np.nanmin(vals):.3g}–{np.nanmax(vals):.3g}"
             + (" (counts divided)" if dgelist.get("divided.counts") else "")
         ))
+    info = dgelist.get("run.info")
+    if info is not None:
+        lines.append("kallisto runs:")
+        for name, r in info.iterrows():
+            parts = [f"{r[k]:,.0f} reads" if k == "n_processed" else f"{r[k]}% pseudoaligned"
+                     for k in ("n_processed", "p_pseudoaligned") if k in r and pd.notna(r[k])]
+            if "kallisto_version" in r and pd.notna(r["kallisto_version"]):
+                parts.append(f"kallisto {r['kallisto_version']}")
+            lines.append(f"  {name}: {', '.join(parts)}")
+    for w in caught:
+        if str(w.message).startswith("Samples were quantified with different"):
+            lines.append(f"Warning: {w.message}")
     return "\n".join(lines)
 
 
@@ -2402,12 +2438,125 @@ def load_sc_data(
 
 
 # ---------------------------------------------------------------------------
+# SC Tool 1b: load_kb
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def load_kb(
+    kb_dirs: list,
+    sample_names: Optional[list] = None,
+    mode: str = "single_cell",
+    layer: Optional[str] = None,
+    filtered: Optional[bool] = None,
+    min_counts: int = 0,
+    group: Optional[list] = None,
+) -> str:
+    """Load kb count (kallisto | bustools) output, one run per sample.
+
+    mode='single_cell' loads the cells for the single-cell mixed model, each
+    run's cells labelled with its sample name (then set_sc_design, with
+    sample_covariates for per-sample covariates, → fit_sc_model).
+    mode='pseudobulk' sums each run's cells into one column for the bulk
+    workflow (filter_genes → normalize → set_design → ...).
+
+    Args:
+        kb_dirs: kb count output directories, one per sample.
+        sample_names: Sample names. Default: the directory names.
+        mode: 'single_cell' (default) or 'pseudobulk'.
+        layer: For the nac workflow: 'mature', 'nascent' or 'ambiguous' (or
+            'cell', 'nucleus', 'total' from --sum). Default: mature +
+            nascent + ambiguous, as in kb's own h5ad.
+        filtered: Use counts_filtered/ (True) or counts_unfiltered/ (False).
+            Default: counts_filtered/ when present.
+        min_counts: Keep only barcodes with at least this many counts, e.g.
+            to drop empty droplets from unfiltered output. Default 0.
+        group: For mode='pseudobulk': the group of each sample.
+    """
+    import scipy.sparse as sp
+
+    if mode not in ("single_cell", "pseudobulk"):
+        raise ValueError("mode must be 'single_cell' or 'pseudobulk'.")
+    if not kb_dirs:
+        raise ValueError("Provide kb_dirs.")
+    if sample_names is None:
+        sample_names = [os.path.basename(os.path.normpath(d)) for d in kb_dirs]
+    sample_names = [str(s) for s in sample_names]
+    if len(sample_names) != len(kb_dirs) or len(set(sample_names)) != len(sample_names):
+        raise ValueError("sample_names must be unique, one for each of kb_dirs.")
+
+    mats, run_lines, unfiltered, versions = [], [], [], {}
+    genes = gene_names = None
+    for d, name in zip(kb_dirs, sample_names):
+        a = ep.read_kb(d, layer=layer, filtered=filtered, verbose=False)
+        if genes is None:
+            genes = list(a.var_names)
+            gene_names = list(a.var["gene_name"]) if "gene_name" in a.var else None
+        elif list(a.var_names) != genes:
+            raise ValueError(f"{d} does not have the same genes as {kb_dirs[0]}; "
+                             "were they run with the same index?")
+        totals = np.asarray(a.X.sum(axis=1)).ravel()
+        keep = totals >= min_counts
+        mats.append(a.X[keep])
+        run_info = a.uns.get("kb", {}).get("run_info", {})
+        line = f"  {name}: {int(keep.sum()):,} cells"
+        if min_counts > 0:
+            line += f" (of {len(keep):,} barcodes)"
+        line += f", {totals[keep].sum():,.0f} counts"
+        if "p_pseudoaligned" in run_info:
+            line += f", {run_info['p_pseudoaligned']}% pseudoaligned"
+        run_lines.append(line)
+        for key in ("kallisto_version", "index_version"):
+            if key in run_info:
+                versions.setdefault(key, {})[name] = run_info[key]
+        if os.path.basename(ep.io._kb_dirs(d, filtered)[0]) != "counts_filtered":
+            unfiltered.append(name)
+
+    notes = []
+    for key, by_sample in versions.items():
+        if len(set(by_sample.values())) > 1:
+            notes.append(f"Warning: samples were run with different {key}s: "
+                         + ", ".join(f"{n}={v}" for n, v in by_sample.items()))
+    if unfiltered and min_counts == 0:
+        notes.append("Note: unfiltered barcodes, including empty droplets, for "
+                     f"{', '.join(unfiltered)}; run kb count --filter, or set min_counts.")
+
+    if mode == "pseudobulk":
+        counts = np.column_stack([np.asarray(m.sum(axis=0)).ravel() for m in mats])
+        genes_df = pd.DataFrame({"gene_id": genes})
+        if gene_names is not None:
+            genes_df["gene_name"] = gene_names
+        if group is not None and len(group) != len(sample_names):
+            raise ValueError(f"group has {len(group)} values for {len(sample_names)} samples.")
+        dgelist = ep.make_dgelist(counts, genes=genes_df,
+                                  group=None if group is None else [str(g) for g in group])
+        dgelist["samples"].index = sample_names
+        lines = _register_loaded(dgelist, source="kb_pseudobulk", data_input=kb_dirs)
+        return "\n".join(lines[:1] + ["Cells per sample:"] + run_lines + lines[1:] + notes)
+
+    X = sp.vstack(mats).tocsr()
+    sample_ids = np.concatenate([np.repeat(name, m.shape[0]) for name, m in zip(sample_names, mats)])
+    _sc_state["counts"] = X.T.toarray().astype(np.float64)
+    _sc_state["sample"] = sample_ids
+    _sc_state["gene_names"] = np.asarray(genes, dtype=object)
+    _sc_state["design"] = None
+    _sc_state["fit"] = None
+    _sc_state["n_cells"] = X.shape[0]
+    _sc_state["n_genes"] = len(genes)
+    _sc_state["n_samples"] = len(sample_names)
+    lines = [f"Loaded {len(genes):,} genes × {X.shape[0]:,} cells, {len(sample_names)} samples"]
+    lines += run_lines + notes
+    lines.append("Use set_sc_design(sample_covariates={...}) for per-sample covariates.")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # SC Tool 2: set_sc_design
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
 def set_sc_design(
-    covariates: dict,
+    covariates: Optional[dict] = None,
+    sample_covariates: Optional[dict] = None,
 ) -> str:
     """Set the design matrix for single-cell analysis.
 
@@ -2416,20 +2565,36 @@ def set_sc_design(
             Must include 'Intercept' (all ones). Values can be lists or
             arrays of length n_cells. Example:
             {"Intercept": [1,1,...], "fed": [1,0,1,...]}
+        sample_covariates: Dictionary mapping column names to per-sample
+            values, {sample: value}, expanded to every cell of the sample.
+            Example: {"fed": {"s1": 1, "s2": 1, "s3": 0, "s4": 0}}. An
+            Intercept column is added when no 'Intercept' is given.
     """
     n = _sc_state["n_cells"]
     if n == 0:
         raise ValueError("No SC data loaded. Use load_sc_data() first.")
+    if covariates is None and sample_covariates is None:
+        raise ValueError("Provide covariates or sample_covariates.")
 
-    cols = list(covariates.keys())
     arrays = {}
-    for col in cols:
-        arr = np.asarray(covariates[col], dtype=np.float64)
+    for col, values in (covariates or {}).items():
+        arr = np.asarray(values, dtype=np.float64)
         if len(arr) != n:
             raise ValueError(
                 f"Column '{col}' has {len(arr)} values but expected {n} cells."
             )
         arrays[col] = arr
+    if sample_covariates:
+        sample = np.asarray(_sc_state["sample"]).astype(str)
+        for col, mapping in sample_covariates.items():
+            mapping = {str(k): v for k, v in mapping.items()}
+            missing = sorted(set(sample) - set(mapping))
+            if missing:
+                raise ValueError(f"sample_covariates['{col}'] has no value for: {', '.join(missing)}")
+            arrays[col] = np.array([mapping[s] for s in sample], dtype=np.float64)
+        if "Intercept" not in arrays:
+            arrays = {"Intercept": np.ones(n), **arrays}
+    cols = list(arrays)
 
     design = pd.DataFrame(arrays, columns=cols)
     _sc_state["design"] = design

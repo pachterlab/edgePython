@@ -5041,7 +5041,7 @@ relationships:
 
 testing:
   framework: pytest
-  total_tests: 641
+  total_tests: 650
   test_directory: tests/
   conftest: tests/conftest.py
   data_directory: tests/data/
@@ -5154,7 +5154,7 @@ testing:
       includes_r_comparison: false
 
     - file: test_mcp_server.py
-      tests: 6
+      tests: 9
       domains: [io, glm_testing, splicing, gene_sets, binomial, single_cell]
       includes_r_comparison: false
       notes: Tests the MCP server (MCP/edgepython_server.py); skipped unless fastmcp is installed.
