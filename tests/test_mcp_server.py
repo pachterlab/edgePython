@@ -285,3 +285,30 @@ def test_load_kb_pseudobulk_and_load_data_auto():
     assert list(y["genes"]["gene_name"]) == [f"GENE{g}" for g in range(1, 7)]
     out = call(("load_data_auto", {"data": os.path.join(KB, "sc_std"), "verbose": False}))
     assert "Loaded 6 genes × 50 samples" in out[0] and "Context: single_cell (kb count output)" in out[0]
+
+
+def test_aggregate_to_genes():
+    salmon = [os.path.join(QUANT, "salmon", f"s{i}") for i in (1, 2, 3)]
+    out = call(
+        ("load_quant", {"source": "kallisto", "parent_dir": os.path.join(QUANT, "kallisto"),
+                        "group": ["A", "A", "B"]}),
+        ("estimate_dispersion", {}),
+        ("exact_test", {}),
+        ("aggregate_to_genes", {}, "error"),
+        ("aggregate_to_genes", {"name": "exact", "tx2gene_path": os.path.join(QUANT, "tx2gene.tsv")}),
+        ("get_top_genes", {"n": 3}),
+        ("aggregate_to_genes", {"name": "exact_genes"}, "error"),
+        ("load_quant", {"source": "salmon", "paths": salmon, "group": ["A", "A", "B"]}),
+        ("estimate_dispersion", {}),
+        ("exact_test", {}),
+        ("aggregate_to_genes", {"weights": "equal", "result_name": "fisher"}),
+        ("get_result_table", {"name": "fisher"}),
+    )
+    assert "give gene= or tx2gene=" in out[3]
+    assert "to 14 genes (Lancaster, sleuth weights) as result 'exact_genes'" in out[4]
+    assert "Result: exact_genes" in out[5] and "NTx" in out[5] and "TopTx.logFC" in out[5]
+    assert "not a transcript-level test" in out[6]
+    assert "(Lancaster, equal weights) as result 'fisher'" in out[10] and "GENE" in out[10]
+    table = pd.read_csv(__import__("io").StringIO(out[11]), sep="\t")
+    assert list(table.columns[:5]) == ["GeneID", "GeneName", "NTx", "PValue", "FDR"]
+    assert len(table) == 14 and table["PValue"].is_monotonic_increasing

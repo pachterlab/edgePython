@@ -44,7 +44,8 @@ mcp = FastMCP(
         "(kallisto | bustools) runs, one per sample: load_kb, as single cells or "
         "pseudo-bulk. DTU: "
         "load_quant → estimate_dispersion → dtu_diff_splice_dge or "
-        "dtu_splice_variants. Methylation: load_bismark → fit_bin_model → "
+        "dtu_splice_variants. Gene-level p-values from a transcript-level test: "
+        "aggregate_to_genes (Lancaster). Methylation: load_bismark → fit_bin_model → "
         "test_bin → get_top_genes. "
         "Single-cell workflow: load_sc_data (or load_kb) → set_sc_design → fit_sc_model → "
         "test_sc_coef → get_sc_top_genes. "
@@ -625,14 +626,16 @@ def load_quant(
             + (" (counts divided)" if dgelist.get("divided.counts") else "")
         ))
     info = dgelist.get("run.info")
-    if info is not None:
-        lines.append("kallisto runs:")
-        for name, r in info.iterrows():
-            parts = [f"{r[k]:,.0f} reads" if k == "n_processed" else f"{r[k]}% pseudoaligned"
-                     for k in ("n_processed", "p_pseudoaligned") if k in r and pd.notna(r[k])]
-            if "kallisto_version" in r and pd.notna(r["kallisto_version"]):
-                parts.append(f"kallisto {r['kallisto_version']}")
-            lines.append(f"  {name}: {', '.join(parts)}")
+    run_lines = []
+    for name, r in (info.iterrows() if info is not None else []):
+        parts = [f"{r[k]:,.0f} reads" if k == "n_processed" else f"{r[k]}% pseudoaligned"
+                 for k in ("n_processed", "p_pseudoaligned") if k in r and pd.notna(r[k])]
+        if "kallisto_version" in r and pd.notna(r["kallisto_version"]):
+            parts.append(f"kallisto {r['kallisto_version']}")
+        if parts:
+            run_lines.append(f"  {name}: {', '.join(parts)}")
+    if run_lines:
+        lines += ["kallisto runs:"] + run_lines
     for w in caught:
         if str(w.message).startswith("Samples were quantified with different"):
             lines.append(f"Warning: {w.message}")
@@ -1710,6 +1713,77 @@ def dtu_splice_variants(
 
 
 # ---------------------------------------------------------------------------
+# Tool 8g: aggregate_to_genes
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def aggregate_to_genes(
+    name: Optional[str] = None,
+    tx2gene_path: Optional[str] = None,
+    gene_column: Optional[str] = None,
+    weights: str = "sleuth",
+    result_name: Optional[str] = None,
+) -> str:
+    """Gene-level p-values from a transcript-level test, by Lancaster's method.
+
+    Combines each gene's transcript p-values (Yi et al. 2018), so genes are
+    found whether their transcripts change together or switch isoforms.
+    Run after a transcript-level test (test_contrast, test_coef,
+    glm_lrt_test or exact_test, e.g. on load_quant output). The gene-level
+    result is stored for get_top_genes and get_result_table.
+
+    Args:
+        name: Transcript-level result to aggregate. Default: most recent.
+        tx2gene_path: TSV/CSV mapping transcript IDs to gene IDs, such as kb
+            ref's t2g.txt. Not needed for Gencode transcript names (their
+            EnsG column is used) or when gene_column is given.
+        gene_column: Gene annotation column holding gene IDs.
+        weights: 'sleuth' (default; mean log normalized count of each
+            transcript, as in sleuth) or 'equal' (Fisher's method).
+        result_name: Name for the gene-level result. Default: '<name>_genes'.
+    """
+    if name is None:
+        name = _state["last_result"]
+    if name is None or name not in _state["results"]:
+        raise ValueError("No transcript-level test result. Run test_contrast() first.")
+    res = _state["results"][name]
+    if "gene.table" in res or res.get("gene_sets") or res.get("dtu"):
+        raise ValueError(f"Result '{name}' is not a transcript-level test.")
+    if weights not in ("sleuth", "equal"):
+        raise ValueError("weights must be 'sleuth' or 'equal'.")
+    tx2gene = None
+    if tx2gene_path is not None:
+        tx2gene = pd.read_csv(tx2gene_path) if tx2gene_path.endswith(".csv") else tx2gene_path
+    table = ep.aggregate_tx_pvalues(
+        res, y=_state["dgelist"] if weights == "sleuth" else None,
+        gene=gene_column, tx2gene=tx2gene,
+        weights="equal" if weights == "equal" else None)
+
+    out_name = result_name or f"{name}_genes"
+    _state["results"][out_name] = {"gene.table": table, "table": table,
+                                   "method": f"Lancaster ({weights} weights)"}
+    _state["last_result"] = out_name
+
+    sig = table["FDR"] < 0.05
+    top = table.sort_values("PValue", kind="stable").head(5)
+    lines = [
+        f"Aggregated {int(table['NTx'].sum()):,} transcripts to {len(table):,} genes "
+        f"(Lancaster, {weights} weights) as result '{out_name}'.",
+        f"Genes with FDR < 0.05: {int(sig.sum()):,}",
+        "",
+        "Top 5 genes:",
+        f"{'Gene':<20} {'NTx':>4} {'PValue':>10} {'FDR':>10}  TopTx",
+        "-" * 64,
+    ]
+    for _, row in top.iterrows():
+        name_ = row.get("GeneName")
+        gene = str(name_) if isinstance(name_, str) and name_ else str(row["GeneID"])
+        lines.append(f"{gene[:19]:<20} {int(row['NTx']):>4d} {row['PValue']:>10.2e} "
+                     f"{row['FDR']:>10.2e}  {row['TopTx']}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Tool 9: get_top_genes
 # ---------------------------------------------------------------------------
 
@@ -1762,8 +1836,8 @@ def get_top_genes(
     ]
 
     # Columns present depend on the test (logFC or logOR; F, LR or none)
-    value_cols = [c for c in ("logFC", "logOR", "logCPM", "F", "LR", "NExons")
-                  if c in table.columns]
+    value_cols = [c for c in ("logFC", "logOR", "logCPM", "F", "LR", "NExons", "NTx",
+                              "TopTx.logFC") if c in table.columns]
     header = f"{'Gene':<20}" + "".join(f" {c:>8}" for c in value_cols)
     header += f" {'PValue':>10} {'FDR':>10} {'Sig':>3}"
     lines.append(header)
@@ -1776,7 +1850,7 @@ def get_top_genes(
         sig_mark = "***" if row["FDR"] < 0.001 else "**" if row["FDR"] < 0.01 else "*" if row["FDR"] < fdr_threshold else ""
         line = f"{gene:<20}"
         for c in value_cols:
-            line += f" {int(row[c]):>8d}" if c == "NExons" else f" {row[c]:>8.3f}"
+            line += f" {int(row[c]):>8d}" if c in ("NExons", "NTx") else f" {row[c]:>8.3f}"
         line += f" {row['PValue']:>10.2e} {row['FDR']:>10.2e} {sig_mark:>3}"
         lines.append(line)
 
