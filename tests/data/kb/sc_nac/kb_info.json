@@ -1,0 +1,40 @@
+{
+    "workdir": ".",
+    "version": "0.30.2",
+    "kallisto": {
+        "path": "kallisto",
+        "version": "0.52.0"
+    },
+    "bustools": {
+        "path": "bustools",
+        "version": "0.45.1"
+    },
+    "start_time": "2026-10-24T11:23:30.477082",
+    "end_time": "2026-10-24T11:23:46.928040",
+    "elapsed": 16.450958,
+    "call": "kb count --kallisto kallisto --bustools bustools -x 10xv3 -w whitelist.txt -i nac.idx -g nac_t2g.txt -c1 c1.txt -c2 c2.txt --workflow nac --filter bustools -o sc_nac sc_R1.fq.gz sc_R2.fq.gz",
+    "commands": [
+        "kallisto bus -i nac.idx -o sc_nac -x 10xv3 -t 8 sc_R1.fq.gz sc_R2.fq.gz",
+        "bustools sort -o sc_nac/tmp/output.s.bus -T sc_nac/tmp -t 8 -m 4G sc_nac/output.bus",
+        "bustools inspect -o sc_nac/inspect.json -w whitelist.txt sc_nac/tmp/output.s.bus",
+        "bustools correct -o sc_nac/tmp/output.s.c.bus -w whitelist.txt sc_nac/tmp/output.s.bus",
+        "bustools sort -o sc_nac/output.unfiltered.bus -T sc_nac/tmp -t 8 -m 4G sc_nac/tmp/output.s.c.bus",
+        "bustools count -o sc_nac/counts_unfiltered/cells_x_genes -g nac_t2g.txt -e sc_nac/matrix.ec -t sc_nac/transcripts.txt -s c2.txt --genecounts --umi-gene sc_nac/output.unfiltered.bus",
+        "bustools allowlist -o sc_nac/filter_barcodes.txt sc_nac/output.unfiltered.bus",
+        "bustools correct -o sc_nac/tmp/output.unfiltered.c.bus -w sc_nac/filter_barcodes.txt sc_nac/output.unfiltered.bus",
+        "bustools sort -o sc_nac/output.filtered.bus -T sc_nac/tmp -t 8 -m 4G sc_nac/tmp/output.unfiltered.c.bus",
+        "bustools count -o sc_nac/counts_filtered/cells_x_genes -g nac_t2g.txt -e sc_nac/matrix.ec -t sc_nac/transcripts.txt -s c2.txt --genecounts --umi-gene sc_nac/output.filtered.bus"
+    ],
+    "runtimes": [
+        1.1886460781097412,
+        2.0469839572906494,
+        1.1193342208862305,
+        1.1480128765106201,
+        2.056028127670288,
+        1.1205618381500244,
+        1.1411731243133545,
+        1.1434569358825684,
+        2.092818260192871,
+        1.117842197418213
+    ]
+}

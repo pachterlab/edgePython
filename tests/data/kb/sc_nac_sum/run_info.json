@@ -1,0 +1,14 @@
+{
+	"n_targets": 15,
+	"n_bootstraps": 0,
+	"n_processed": 17327,
+	"n_pseudoaligned": 17327,
+	"n_unique": 3003,
+	"p_pseudoaligned": 100.0,
+	"p_unique": 17.3,
+	"kallisto_version": "0.52.0",
+	"index_version": 13,
+	"k-mer length": 31,
+	"start_time": "Sat Oct 24 11:23:52 2026",
+	"call": "kallisto bus -i nac.idx -o sc_nac_sum -x 10xv3 -t 8 sc_R1.fq.gz sc_R2.fq.gz"
+}

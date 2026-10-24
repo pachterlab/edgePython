@@ -1,0 +1,32 @@
+{
+    "workdir": ".",
+    "version": "0.30.2",
+    "kallisto": {
+        "path": "kallisto",
+        "version": "0.52.0"
+    },
+    "bustools": {
+        "path": "bustools",
+        "version": "0.45.1"
+    },
+    "start_time": "2026-10-24T11:23:50.410425",
+    "end_time": "2026-10-24T11:24:01.701652",
+    "elapsed": 11.291227,
+    "call": "kb count --kallisto kallisto --bustools bustools -x 10xv3 -w whitelist.txt -i nac.idx -g nac_t2g.txt -c1 c1.txt -c2 c2.txt --workflow nac --sum total -o sc_nac_sum sc_R1.fq.gz sc_R2.fq.gz",
+    "commands": [
+        "kallisto bus -i nac.idx -o sc_nac_sum -x 10xv3 -t 8 sc_R1.fq.gz sc_R2.fq.gz",
+        "bustools sort -o sc_nac_sum/tmp/output.s.bus -T sc_nac_sum/tmp -t 8 -m 4G sc_nac_sum/output.bus",
+        "bustools inspect -o sc_nac_sum/inspect.json -w whitelist.txt sc_nac_sum/tmp/output.s.bus",
+        "bustools correct -o sc_nac_sum/tmp/output.s.c.bus -w whitelist.txt sc_nac_sum/tmp/output.s.bus",
+        "bustools sort -o sc_nac_sum/output.unfiltered.bus -T sc_nac_sum/tmp -t 8 -m 4G sc_nac_sum/tmp/output.s.c.bus",
+        "bustools count -o sc_nac_sum/counts_unfiltered/cells_x_genes -g nac_t2g.txt -e sc_nac_sum/matrix.ec -t sc_nac_sum/transcripts.txt -s c2.txt --genecounts --umi-gene sc_nac_sum/output.unfiltered.bus"
+    ],
+    "runtimes": [
+        1.182424783706665,
+        2.308593988418579,
+        1.1178722381591797,
+        1.1461331844329834,
+        2.150266170501709,
+        1.1161322593688965
+    ]
+}
