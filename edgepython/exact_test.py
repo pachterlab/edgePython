@@ -129,10 +129,9 @@ def exact_test(y, pair=None, dispersion='auto', rejection_region='doubletail',
     group = np.array([str(g) for g in group])
     unique_group_labels = np.array([str(g) for g in unique_groups])
 
-    # Get dispersion.  The comparison must not be attempted on an array: `== 'auto'`
-    # on a per-gene vector raises "the truth value of an array … is ambiguous".
-    if dispersion is None or (not isinstance(dispersion, np.ndarray)
-                              and dispersion == 'auto'):
+    # Get dispersion.  Compare with 'auto' only for a string: `== 'auto'` on a per-gene
+    # array or Series raises "the truth value of an array … is ambiguous".
+    if dispersion is None or (isinstance(dispersion, str) and dispersion == 'auto'):
         from .dgelist import get_dispersion
         dispersion = get_dispersion(y)
         if dispersion is None:

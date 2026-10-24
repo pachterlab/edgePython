@@ -248,3 +248,21 @@ def test_norm_lib_sizes_dgelist():
     ref = ep.calc_norm_factors(dge["counts"], lib_size=dge["samples"]["lib.size"].values,
                                method="TMM")
     _close(out["samples"]["norm.factors"].values, ref)
+
+
+def test_exact_test_dispersion_series_and_list():
+    # A pandas Series or a list of per-gene dispersions behaves like the ndarray.
+    import pandas as pd
+    dge = ep.make_dgelist(counts=COUNTS12, group=GROUP12)
+    ref = np.asarray(ep.exact_test(dge, dispersion=DISP12)["table"]["PValue"])
+    for disp in (pd.Series(DISP12), list(DISP12)):
+        got = ep.exact_test(dge, dispersion=disp)["table"]["PValue"]
+        _close(got, ref, rtol=0, atol=0)
+
+
+def test_norm_lib_sizes_signature():
+    # The wrapper keeps its own name but reports calc_norm_factors' parameters.
+    import inspect
+    assert ep.norm_lib_sizes.__name__ == "norm_lib_sizes"
+    assert (inspect.signature(ep.norm_lib_sizes)
+            == inspect.signature(ep.calc_norm_factors))

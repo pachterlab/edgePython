@@ -6,6 +6,7 @@ Port of edgeR's calcNormFactors/normLibSizes (TMM, TMMwsp, RLE, upperquartile)
 and ChIP-seq normalization (normalizeChIPtoInput, calcNormOffsetsforChIP).
 """
 
+import functools
 import numpy as np
 import warnings
 from scipy import stats
@@ -65,6 +66,7 @@ def calc_norm_factors(counts, lib_size=None, method='TMM', ref_column=None,
 
 
 # normLibSizes is edgeR's canonical name; calcNormFactors the deprecated alias.
+@functools.wraps(calc_norm_factors, assigned=('__module__', '__annotations__'))
 def norm_lib_sizes(*args, **kwargs):
     """Library-sizes-based normalization factors -- edgeR's canonical name.
 
