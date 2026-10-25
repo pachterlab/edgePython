@@ -2,7 +2,7 @@
 # Machine-readable specification with typed schema and controlled vocabularies.
 #
 # Schema version: 1.0.0
-# Generated: 2025-02-09; updated 2026-10-19 for edgePython 0.5.0
+# Generated: 2025-02-09; updated 2026-10-24 for edgePython 0.5.1
 # Format: YAML 1.2
 
 # =====================================================================
@@ -11,7 +11,7 @@
 
 package:
   name: edgePython
-  version: "0.5.0"
+  version: "0.5.1"
   description: >-
     Python port of the edgeR Bioconductor package for empirical analysis
     of digital gene expression data.
